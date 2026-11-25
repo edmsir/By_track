@@ -1,24 +1,49 @@
 -- ============================================================
--- by Fabric — Saha Takip & Check-in Veritabanı Kurulumu
--- Bu dosyayı Supabase Dashboard -> SQL Editor bölümüne yapıştırıp
--- "Run" butonuna basarak çalıştırın.
+-- by Fabric — Çok Kademeli Hiyerarşik Rol & Şube Mimarisi (v2.0)
+-- 
+-- Roller & Yetkiler:
+-- 1. admin    : Tam Yetki (Tüm şubeler, tüm satışçılar, kullanıcı açma/silme/şifre, şube açma, check-in silme)
+-- 2. yonetim  : Genel Müdürlük (Tüm şubeleri ve satışçıları canlı haritada izler, Excel raporu alır; kullanıcı yönetimi yapmaz)
+-- 3. mudur    : Şube Müdürü (Sadece KENDİ şubesindeki satışçıları izler ve raporlar. Sadece kendi şubesine satışçı ekleyebilir ve şifre değiştirebilir)
+-- 4. rep      : Satış Temsilcisi (Sadece kendi son check-in'lerini görür ve konum kaydeder)
 -- ============================================================
 
--- 1. Şifreleme eklentisi (bcrypt için)
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
--- 2. Kullanıcılar tablosu (E-posta zorunluluğu yok, kullanıcı adı + şifre)
+-- 1. Şubeler Tablosu
+CREATE TABLE IF NOT EXISTS public.branches (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name text UNIQUE NOT NULL,
+  city text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Varsayılan Örnek Şubeler
+INSERT INTO public.branches (name, city) VALUES 
+  ('Merkez Şube', 'İstanbul'),
+  ('Anadolu Şube', 'Kayseri'),
+  ('Ege Şube', 'İzmir'),
+  ('Marmara Şube', 'Bursa'),
+  ('Akdeniz Şube', 'Antalya')
+ON CONFLICT (name) DO NOTHING;
+
+-- 2. app_users Tablosu ve Güncellemeler
 CREATE TABLE IF NOT EXISTS public.app_users (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   username text UNIQUE NOT NULL,
   full_name text NOT NULL,
   password_hash text NOT NULL,
-  role text NOT NULL DEFAULT 'rep' CHECK (role IN ('admin', 'rep')),
+  role text NOT NULL DEFAULT 'rep',
+  branch_id uuid REFERENCES public.branches(id) ON DELETE SET NULL,
   is_active boolean NOT NULL DEFAULT true,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
--- 3. Check-in (Konum Paylaşımı) tablosu
+ALTER TABLE public.app_users ADD COLUMN IF NOT EXISTS branch_id uuid REFERENCES public.branches(id) ON DELETE SET NULL;
+ALTER TABLE public.app_users DROP CONSTRAINT IF EXISTS app_users_role_check;
+ALTER TABLE public.app_users ADD CONSTRAINT app_users_role_check CHECK (role IN ('admin', 'yonetim', 'mudur', 'rep'));
+
+-- 3. check_ins Tablosu ve Güncellemeler
 CREATE TABLE IF NOT EXISTS public.check_ins (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id uuid NOT NULL REFERENCES public.app_users(id) ON DELETE CASCADE,
@@ -29,39 +54,76 @@ CREATE TABLE IF NOT EXISTS public.check_ins (
   latitude double precision NOT NULL,
   longitude double precision NOT NULL,
   accuracy double precision,
+  branch_id uuid REFERENCES public.branches(id) ON DELETE SET NULL,
   is_mock boolean DEFAULT false,
   network_city text,
   reverse_city text,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
--- Kolonların mevcut tablolarda da olmasını sağla
-ALTER TABLE public.check_ins ADD COLUMN IF NOT EXISTS is_mock boolean DEFAULT false;
-ALTER TABLE public.check_ins ADD COLUMN IF NOT EXISTS network_city text;
-ALTER TABLE public.check_ins ADD COLUMN IF NOT EXISTS reverse_city text;
+ALTER TABLE public.check_ins ADD COLUMN IF NOT EXISTS branch_id uuid REFERENCES public.branches(id) ON DELETE SET NULL;
 
-CREATE INDEX IF NOT EXISTS idx_check_ins_created_at ON public.check_ins (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_check_ins_branch_id ON public.check_ins (branch_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_check_ins_user_id ON public.check_ins (user_id, created_at DESC);
 
--- 4. RLS (Row Level Security)
+-- 4. RLS ve İzinler (DELETE ve SELECT kesin açık)
 ALTER TABLE public.app_users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.check_ins ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.branches ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "check_ins_select_all" ON public.check_ins;
-CREATE POLICY "check_ins_select_all"
-  ON public.check_ins
-  FOR SELECT
-  TO anon, authenticated
-  USING (true);
+CREATE POLICY "check_ins_select_all" ON public.check_ins FOR SELECT TO anon, authenticated USING (true);
 
 DROP POLICY IF EXISTS "check_ins_delete_all" ON public.check_ins;
-CREATE POLICY "check_ins_delete_all"
-  ON public.check_ins
-  FOR DELETE
-  TO anon, authenticated
-  USING (true);
+CREATE POLICY "check_ins_delete_all" ON public.check_ins FOR DELETE TO anon, authenticated USING (true);
 
--- 5. Giriş Fonksiyonu (Kullanıcı adı + Şifre)
+DROP POLICY IF EXISTS "branches_select_all" ON public.branches;
+CREATE POLICY "branches_select_all" ON public.branches FOR SELECT TO anon, authenticated USING (true);
+
+-- 5. Şube Listeleme
+DROP FUNCTION IF EXISTS public.get_branches();
+CREATE OR REPLACE FUNCTION public.get_branches()
+RETURNS TABLE (
+  id uuid,
+  name text,
+  city text
+)
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT id, name, city FROM public.branches ORDER BY name ASC;
+$$;
+
+-- 6. Şube Ekleme (Sadece Admin)
+DROP FUNCTION IF EXISTS public.admin_create_branch(uuid, text, text);
+CREATE OR REPLACE FUNCTION public.admin_create_branch(
+  p_admin_id uuid,
+  p_name text,
+  p_city text DEFAULT NULL
+)
+RETURNS public.branches
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_branch public.branches%ROWTYPE;
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM public.app_users WHERE id = p_admin_id AND role = 'admin' AND is_active = true) THEN
+    RAISE EXCEPTION 'Bu işlem için admin yetkisi gerekiyor.';
+  END IF;
+
+  INSERT INTO public.branches (name, city)
+  VALUES (trim(p_name), trim(p_city))
+  RETURNING * INTO v_branch;
+
+  RETURN v_branch;
+END;
+$$;
+
+-- 7. Giriş Fonksiyonu (login_user)
+DROP FUNCTION IF EXISTS public.login_user(text, text);
 CREATE OR REPLACE FUNCTION public.login_user(
   p_username text,
   p_password text
@@ -71,6 +133,8 @@ RETURNS TABLE (
   username text,
   full_name text,
   role text,
+  branch_id uuid,
+  branch_name text,
   is_active boolean,
   created_at timestamptz
 )
@@ -80,6 +144,7 @@ SET search_path = public, extensions
 AS $$
 DECLARE
   v_user public.app_users%ROWTYPE;
+  v_branch_name text;
   v_clean_username text;
 BEGIN
   v_clean_username := lower(trim(p_username));
@@ -100,180 +165,87 @@ BEGIN
     RAISE EXCEPTION 'Hesabınız pasif durumda. Yöneticinizle iletişime geçin.';
   END IF;
 
+  SELECT b.name INTO v_branch_name FROM public.branches b WHERE b.id = v_user.branch_id;
+
   RETURN QUERY
-  SELECT v_user.id, v_user.username, v_user.full_name, v_user.role, v_user.is_active, v_user.created_at;
+  SELECT v_user.id, v_user.username, v_user.full_name, v_user.role, v_user.branch_id, v_branch_name, v_user.is_active, v_user.created_at;
 END;
 $$;
 
--- 6. Admin Yetki Kontrol Yardımcısı
-CREATE OR REPLACE FUNCTION public._assert_admin(p_admin_id uuid)
-RETURNS void
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public
-AS $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM public.app_users
-    WHERE id = p_admin_id AND role = 'admin' AND is_active = true
-  ) THEN
-    RAISE EXCEPTION 'Bu işlem için yönetici yetkisi gerekiyor.';
-  END IF;
-END;
-$$;
-
--- 7. Kullanıcı Listeleme (Sadece Admin)
-CREATE OR REPLACE FUNCTION public.admin_list_users(p_admin_id uuid)
+-- 8. Hiyerarşik Check-in Listeleme (get_authorized_check_ins)
+DROP FUNCTION IF EXISTS public.get_authorized_check_ins(uuid);
+CREATE OR REPLACE FUNCTION public.get_authorized_check_ins(
+  p_requester_id uuid
+)
 RETURNS TABLE (
   id uuid,
+  user_id uuid,
   username text,
   full_name text,
-  role text,
-  is_active boolean,
+  customer_name text,
+  note text,
+  latitude double precision,
+  longitude double precision,
+  accuracy double precision,
+  branch_id uuid,
+  branch_name text,
+  is_mock boolean,
+  network_city text,
+  reverse_city text,
   created_at timestamptz
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public
-AS $$
-BEGIN
-  PERFORM public._assert_admin(p_admin_id);
-
-  RETURN QUERY
-  SELECT u.id, u.username, u.full_name, u.role, u.is_active, u.created_at
-  FROM public.app_users u
-  ORDER BY u.role ASC, u.created_at DESC;
-END;
-$$;
-
--- 8. Yeni Kullanıcı Oluşturma (Sadece Admin)
-CREATE OR REPLACE FUNCTION public.admin_create_user(
-  p_admin_id uuid,
-  p_username text,
-  p_full_name text,
-  p_password text,
-  p_role text DEFAULT 'rep'
-)
-RETURNS TABLE (
-  id uuid,
-  username text,
-  full_name text,
-  role text,
-  is_active boolean,
-  created_at timestamptz
-)
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public, extensions
 AS $$
 DECLARE
-  v_clean_username text;
-  v_new public.app_users%ROWTYPE;
+  v_req public.app_users%ROWTYPE;
 BEGIN
-  PERFORM public._assert_admin(p_admin_id);
-
-  v_clean_username := lower(trim(p_username));
-
-  IF length(v_clean_username) < 2 THEN
-    RAISE EXCEPTION 'Kullanıcı adı en az 2 karakter olmalıdır.';
+  SELECT * INTO v_req FROM public.app_users WHERE id = p_requester_id AND is_active = true;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Kullanıcı bulunamadı veya pasif.';
   END IF;
 
-  IF length(trim(p_full_name)) < 2 THEN
-    RAISE EXCEPTION 'Ad Soyad en az 2 karakter olmalıdır.';
+  IF v_req.role IN ('admin', 'yonetim') THEN
+    -- Admin ve Yönetim: Tüm şubeleri ve satışçıları görür
+    RETURN QUERY
+    SELECT c.id, c.user_id, c.username, c.full_name, c.customer_name, c.note,
+           c.latitude, c.longitude, c.accuracy, c.branch_id, b.name AS branch_name,
+           c.is_mock, c.network_city, c.reverse_city, c.created_at
+    FROM public.check_ins c
+    LEFT JOIN public.branches b ON b.id = c.branch_id
+    ORDER BY c.created_at DESC
+    LIMIT 500;
+
+  ELSIF v_req.role = 'mudur' THEN
+    -- Şube Müdürü: SADECE KENDİ ŞUBESİNDEKİ satışçıları görür
+    RETURN QUERY
+    SELECT c.id, c.user_id, c.username, c.full_name, c.customer_name, c.note,
+           c.latitude, c.longitude, c.accuracy, c.branch_id, b.name AS branch_name,
+           c.is_mock, c.network_city, c.reverse_city, c.created_at
+    FROM public.check_ins c
+    LEFT JOIN public.branches b ON b.id = c.branch_id
+    WHERE c.branch_id = v_req.branch_id
+    ORDER BY c.created_at DESC
+    LIMIT 500;
+
+  ELSE
+    -- Satış Temsilcisi: Sadece kendi hareketleri
+    RETURN QUERY
+    SELECT c.id, c.user_id, c.username, c.full_name, c.customer_name, c.note,
+           c.latitude, c.longitude, c.accuracy, c.branch_id, b.name AS branch_name,
+           c.is_mock, c.network_city, c.reverse_city, c.created_at
+    FROM public.check_ins c
+    LEFT JOIN public.branches b ON b.id = c.branch_id
+    WHERE c.user_id = v_req.id
+    ORDER BY c.created_at DESC
+    LIMIT 100;
   END IF;
-
-  IF length(p_password) < 4 THEN
-    RAISE EXCEPTION 'Şifre en az 4 karakter olmalıdır.';
-  END IF;
-
-  IF p_role NOT IN ('admin', 'rep') THEN
-    RAISE EXCEPTION 'Geçersiz rol.';
-  END IF;
-
-  IF EXISTS (SELECT 1 FROM public.app_users u WHERE u.username = v_clean_username) THEN
-    RAISE EXCEPTION 'Bu kullanıcı adı zaten kullanılıyor.';
-  END IF;
-
-  INSERT INTO public.app_users (username, full_name, password_hash, role)
-  VALUES (v_clean_username, trim(p_full_name), crypt(p_password, gen_salt('bf')), p_role)
-  RETURNING * INTO v_new;
-
-  RETURN QUERY
-  SELECT v_new.id, v_new.username, v_new.full_name, v_new.role, v_new.is_active, v_new.created_at;
 END;
 $$;
 
--- 9. Kullanıcı Aktif / Pasif Yapma (Sadece Admin)
-CREATE OR REPLACE FUNCTION public.admin_toggle_user(
-  p_admin_id uuid,
-  p_target_user_id uuid,
-  p_is_active boolean
-)
-RETURNS void
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public
-AS $$
-BEGIN
-  PERFORM public._assert_admin(p_admin_id);
-
-  IF p_admin_id = p_target_user_id AND NOT p_is_active THEN
-    RAISE EXCEPTION 'Kendi yönetici hesabınızı pasife alamazsınız.';
-  END IF;
-
-  UPDATE public.app_users
-  SET is_active = p_is_active
-  WHERE id = p_target_user_id;
-END;
-$$;
-
--- 10. Kullanıcı Şifre Sıfırlama (Sadece Admin)
-CREATE OR REPLACE FUNCTION public.admin_reset_password(
-  p_admin_id uuid,
-  p_target_user_id uuid,
-  p_new_password text
-)
-RETURNS void
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public, extensions
-AS $$
-BEGIN
-  PERFORM public._assert_admin(p_admin_id);
-
-  IF length(p_new_password) < 4 THEN
-    RAISE EXCEPTION 'Yeni şifre en az 4 karakter olmalıdır.';
-  END IF;
-
-  UPDATE public.app_users
-  SET password_hash = crypt(p_new_password, gen_salt('bf'))
-  WHERE id = p_target_user_id;
-END;
-$$;
-
--- 11. Kullanıcı Silme (Sadece Admin)
-CREATE OR REPLACE FUNCTION public.admin_delete_user(
-  p_admin_id uuid,
-  p_target_user_id uuid
-)
-RETURNS void
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public
-AS $$
-BEGIN
-  PERFORM public._assert_admin(p_admin_id);
-
-  IF p_admin_id = p_target_user_id THEN
-    RAISE EXCEPTION 'Kendi yönetici hesabınızı silemezsiniz.';
-  END IF;
-
-  DELETE FROM public.app_users
-  WHERE id = p_target_user_id;
-END;
-$$;
-
--- 12. Check-in Kaydı Oluşturma (Fake GPS & IP verisi ile)
+-- 9. Check-in Kaydetme (Otomatik Şube Ekler)
+DROP FUNCTION IF EXISTS public.create_check_in(uuid, text, text, double precision, double precision, double precision, boolean, text, text);
 CREATE OR REPLACE FUNCTION public.create_check_in(
   p_user_id uuid,
   p_customer_name text,
@@ -308,7 +280,7 @@ BEGIN
 
   INSERT INTO public.check_ins (
     user_id, username, full_name, customer_name, note, latitude, longitude, accuracy,
-    is_mock, network_city, reverse_city
+    branch_id, is_mock, network_city, reverse_city
   )
   VALUES (
     v_user.id,
@@ -319,6 +291,7 @@ BEGIN
     p_latitude,
     p_longitude,
     p_accuracy,
+    v_user.branch_id, -- Kullanıcının bağlı olduğu şube otomatik atanır
     COALESCE(p_is_mock, false),
     p_network_city,
     p_reverse_city
@@ -329,56 +302,286 @@ BEGIN
 END;
 $$;
 
--- 13. Admin: Tekil Check-in Bildirimi Silme (Hatalı / Test kayıtları için)
-CREATE OR REPLACE FUNCTION public.admin_delete_check_in(
-  p_admin_id uuid,
-  p_check_in_id uuid
+-- 10. Kullanıcı Listeleme (admin_list_users)
+DROP FUNCTION IF EXISTS public.admin_list_users(uuid);
+CREATE OR REPLACE FUNCTION public.admin_list_users(p_admin_id uuid)
+RETURNS TABLE (
+  id uuid,
+  username text,
+  full_name text,
+  role text,
+  branch_id uuid,
+  branch_name text,
+  is_active boolean,
+  created_at timestamptz
 )
-RETURNS void
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public
-AS $$
-BEGIN
-  PERFORM public._assert_admin(p_admin_id);
-
-  DELETE FROM public.check_ins
-  WHERE id = p_check_in_id;
-END;
-$$;
-
--- 14. Admin: Toplu Bildirim Temizleme (Örn. tüm testleri veya bir temsilcinin kayıtlarını silme)
-CREATE OR REPLACE FUNCTION public.admin_bulk_delete_check_ins(
-  p_admin_id uuid,
-  p_target_username text DEFAULT NULL
-)
-RETURNS integer
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public
 AS $$
 DECLARE
-  v_count integer;
+  v_req public.app_users%ROWTYPE;
 BEGIN
-  PERFORM public._assert_admin(p_admin_id);
-
-  IF p_target_username IS NOT NULL AND p_target_username <> 'all' THEN
-    DELETE FROM public.check_ins WHERE username = p_target_username;
-  ELSE
-    DELETE FROM public.check_ins;
+  SELECT * INTO v_req FROM public.app_users WHERE id = p_admin_id AND is_active = true;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Kullanıcı yetkisi bulunamadı.';
   END IF;
 
-  GET DIAGNOSTICS v_count = ROW_COUNT;
-  RETURN v_count;
+  IF v_req.role = 'admin' THEN
+    -- Admin tüm personeli görür
+    RETURN QUERY
+    SELECT u.id, u.username, u.full_name, u.role, u.branch_id, b.name AS branch_name, u.is_active, u.created_at
+    FROM public.app_users u
+    LEFT JOIN public.branches b ON b.id = u.branch_id
+    ORDER BY u.role ASC, u.created_at DESC;
+
+  ELSIF v_req.role = 'mudur' THEN
+    -- Şube Müdürü sadece kendi şubesindeki satış temsilcilerini görür
+    RETURN QUERY
+    SELECT u.id, u.username, u.full_name, u.role, u.branch_id, b.name AS branch_name, u.is_active, u.created_at
+    FROM public.app_users u
+    LEFT JOIN public.branches b ON b.id = u.branch_id
+    WHERE u.branch_id = v_req.branch_id AND u.role = 'rep'
+    ORDER BY u.created_at DESC;
+
+  ELSE
+    RAISE EXCEPTION 'Bu işlem için yetkiniz yok.';
+  END IF;
 END;
 $$;
 
--- 15. Varsayılan Admin Kullanıcısı (Kullanıcı adı: admin | Şifre: 123456)
+-- 11. Kullanıcı Oluşturma (admin_create_user)
+DROP FUNCTION IF EXISTS public.admin_create_user(uuid, text, text, text, text);
+DROP FUNCTION IF EXISTS public.admin_create_user(uuid, text, text, text, text, uuid);
+CREATE OR REPLACE FUNCTION public.admin_create_user(
+  p_admin_id uuid,
+  p_username text,
+  p_full_name text,
+  p_password text,
+  p_role text DEFAULT 'rep',
+  p_branch_id uuid DEFAULT NULL
+)
+RETURNS TABLE (
+  id uuid,
+  username text,
+  full_name text,
+  role text,
+  branch_id uuid,
+  is_active boolean,
+  created_at timestamptz
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, extensions
+AS $$
+DECLARE
+  v_req public.app_users%ROWTYPE;
+  v_clean_username text;
+  v_assigned_branch uuid;
+  v_new public.app_users%ROWTYPE;
+BEGIN
+  SELECT * INTO v_req FROM public.app_users WHERE id = p_admin_id AND is_active = true;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Yetkisiz işlem.';
+  END IF;
+
+  v_clean_username := lower(trim(p_username));
+  v_assigned_branch := p_branch_id;
+
+  -- Müdür sadece kendi şubesine satış temsilcisi (rep) ekleyebilir
+  IF v_req.role = 'mudur' THEN
+    IF p_role <> 'rep' THEN
+      RAISE EXCEPTION 'Şube müdürleri sadece satış temsilcisi ekleyebilir.';
+    END IF;
+    v_assigned_branch := v_req.branch_id;
+  ELSIF v_req.role <> 'admin' THEN
+    RAISE EXCEPTION 'Kullanıcı oluşturma yetkiniz yok.';
+  END IF;
+
+  IF length(v_clean_username) < 2 THEN
+    RAISE EXCEPTION 'Kullanıcı adı en az 2 karakter olmalıdır.';
+  END IF;
+  IF length(p_password) < 4 THEN
+    RAISE EXCEPTION 'Şifre en az 4 karakter olmalıdır.';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.app_users WHERE username = v_clean_username) THEN
+    RAISE EXCEPTION 'Bu kullanıcı adı zaten kullanılıyor.';
+  END IF;
+
+  INSERT INTO public.app_users (username, full_name, password_hash, role, branch_id)
+  VALUES (v_clean_username, trim(p_full_name), crypt(p_password, gen_salt('bf')), p_role, v_assigned_branch)
+  RETURNING * INTO v_new;
+
+  RETURN QUERY
+  SELECT v_new.id, v_new.username, v_new.full_name, v_new.role, v_new.branch_id, v_new.is_active, v_new.created_at;
+END;
+$$;
+
+-- 12. Şifre Sıfırlama (admin_reset_password)
+DROP FUNCTION IF EXISTS public.admin_reset_password(uuid, uuid, text);
+CREATE OR REPLACE FUNCTION public.admin_reset_password(
+  p_admin_id uuid,
+  p_target_user_id uuid,
+  p_new_password text
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, extensions
+AS $$
+DECLARE
+  v_req public.app_users%ROWTYPE;
+  v_target public.app_users%ROWTYPE;
+BEGIN
+  SELECT * INTO v_req FROM public.app_users WHERE id = p_admin_id AND is_active = true;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Yetkisiz işlem.';
+  END IF;
+
+  SELECT * INTO v_target FROM public.app_users WHERE id = p_target_user_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Kullanıcı bulunamadı.';
+  END IF;
+
+  IF length(p_new_password) < 4 THEN
+    RAISE EXCEPTION 'Şifre en az 4 karakter olmalıdır.';
+  END IF;
+
+  -- Müdür kontrolü: sadece kendi şubesindeki rep'in şifresini değiştirebilir
+  IF v_req.role = 'mudur' THEN
+    IF v_target.role <> 'rep' OR v_target.branch_id IS DISTINCT FROM v_req.branch_id THEN
+      RAISE EXCEPTION 'Sadece kendi şubenizdeki satış temsilcilerinin şifresini değiştirebilirsiniz.';
+    END IF;
+  ELSIF v_req.role <> 'admin' THEN
+    RAISE EXCEPTION 'Şifre sıfırlama yetkiniz yok.';
+  END IF;
+
+  UPDATE public.app_users
+  SET password_hash = crypt(p_new_password, gen_salt('bf'))
+  WHERE id = p_target_user_id;
+
+  RETURN true;
+END;
+$$;
+
+-- 13. Kullanıcı Aktif/Pasif Durumu Değiştirme (admin_toggle_user)
+DROP FUNCTION IF EXISTS public.admin_toggle_user(uuid, uuid, boolean);
+CREATE OR REPLACE FUNCTION public.admin_toggle_user(
+  p_admin_id uuid,
+  p_target_user_id uuid,
+  p_is_active boolean
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_req public.app_users%ROWTYPE;
+  v_target public.app_users%ROWTYPE;
+BEGIN
+  SELECT * INTO v_req FROM public.app_users WHERE id = p_admin_id AND is_active = true;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Yetkisiz işlem.';
+  END IF;
+
+  IF p_admin_id = p_target_user_id THEN
+    RAISE EXCEPTION 'Kendi hesabınızın durumunu değiştiremezsiniz.';
+  END IF;
+
+  SELECT * INTO v_target FROM public.app_users WHERE id = p_target_user_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Kullanıcı bulunamadı.';
+  END IF;
+
+  IF v_req.role = 'mudur' THEN
+    IF v_target.role <> 'rep' OR v_target.branch_id IS DISTINCT FROM v_req.branch_id THEN
+      RAISE EXCEPTION 'Sadece kendi şubenizdeki personeli yönetebilirsiniz.';
+    END IF;
+  ELSIF v_req.role <> 'admin' THEN
+    RAISE EXCEPTION 'Kullanıcı durumu değiştirme yetkiniz yok.';
+  END IF;
+
+  UPDATE public.app_users
+  SET is_active = p_is_active
+  WHERE id = p_target_user_id;
+
+  RETURN true;
+END;
+$$;
+
+-- 14. Kullanıcı Silme (admin_delete_user - Sadece Admin)
+DROP FUNCTION IF EXISTS public.admin_delete_user(uuid, uuid);
+CREATE OR REPLACE FUNCTION public.admin_delete_user(
+  p_admin_id uuid,
+  p_target_user_id uuid
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM public.app_users WHERE id = p_admin_id AND role = 'admin' AND is_active = true) THEN
+    RAISE EXCEPTION 'Kullanıcı silme yetkisi sadece sistem yöneticisindedir.';
+  END IF;
+
+  IF p_admin_id = p_target_user_id THEN
+    RAISE EXCEPTION 'Kendi hesabınızı silemezsiniz.';
+  END IF;
+
+  DELETE FROM public.app_users WHERE id = p_target_user_id;
+  RETURN true;
+END;
+$$;
+
+-- 15. Check-in Silme (admin_delete_check_in)
+DROP FUNCTION IF EXISTS public.admin_delete_check_in(uuid, uuid);
+DROP FUNCTION IF EXISTS public.admin_delete_check_in(uuid);
+CREATE OR REPLACE FUNCTION public.admin_delete_check_in(
+  p_admin_id uuid,
+  p_check_in_id uuid
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_req public.app_users%ROWTYPE;
+  v_ci public.check_ins%ROWTYPE;
+BEGIN
+  SELECT * INTO v_req FROM public.app_users WHERE id = p_admin_id AND is_active = true;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Yetkisiz işlem.';
+  END IF;
+
+  SELECT * INTO v_ci FROM public.check_ins WHERE id = p_check_in_id;
+  IF NOT FOUND THEN
+    RETURN true; -- Zaten silinmiş
+  END IF;
+
+  IF v_req.role = 'admin' THEN
+    DELETE FROM public.check_ins WHERE id = p_check_in_id;
+  ELSIF v_req.role = 'mudur' THEN
+    IF v_ci.branch_id IS DISTINCT FROM v_req.branch_id THEN
+      RAISE EXCEPTION 'Sadece kendi şubenize ait bildirimleri silebilirsiniz.';
+    END IF;
+    DELETE FROM public.check_ins WHERE id = p_check_in_id;
+  ELSE
+    RAISE EXCEPTION 'Bildirim silme yetkiniz yok.';
+  END IF;
+
+  RETURN true;
+END;
+$$;
+
+-- 16. Varsayılan Admin Hesabı (admin / 123456)
 INSERT INTO public.app_users (username, full_name, password_hash, role)
 VALUES ('admin', 'Sistem Yöneticisi', crypt('123456', gen_salt('bf')), 'admin')
 ON CONFLICT (username) DO NOTHING;
 
--- 16. Anlık Sesli Bildirim için Realtime Yayınını Aç
+-- 17. Realtime Yayın
 DO $$
 BEGIN
   ALTER PUBLICATION supabase_realtime ADD TABLE public.check_ins;

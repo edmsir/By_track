@@ -10,11 +10,14 @@ import {
   AlertCircle,
   CheckCircle2,
   Loader2,
+  Building2,
+  Briefcase,
 } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 
 export default function UserManagement({ adminUser }) {
   const [users, setUsers] = useState([])
+  const [branches, setBranches] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
@@ -24,12 +27,31 @@ export default function UserManagement({ adminUser }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [role, setRole] = useState('rep')
+  const [selectedBranch, setSelectedBranch] = useState(
+    adminUser.role === 'mudur' ? adminUser.branch_id || '' : ''
+  )
   const [creating, setCreating] = useState(false)
 
   // Password reset modal state
   const [resetTarget, setResetTarget] = useState(null)
   const [newPassword, setNewPassword] = useState('')
   const [resetting, setResetting] = useState(false)
+
+  const isMudur = adminUser.role === 'mudur'
+
+  const loadBranches = useCallback(async () => {
+    try {
+      const { data } = await supabase.rpc('get_branches')
+      if (data && data.length > 0) {
+        setBranches(data)
+        if (!isMudur && !selectedBranch) {
+          setSelectedBranch(data[0].id)
+        }
+      }
+    } catch (e) {
+      console.warn('Şubeler alınamadı:', e)
+    }
+  }, [isMudur, selectedBranch])
 
   const loadUsers = useCallback(async () => {
     setLoading(true)
@@ -48,8 +70,9 @@ export default function UserManagement({ adminUser }) {
   }, [adminUser.id])
 
   useEffect(() => {
+    loadBranches()
     loadUsers()
-  }, [loadUsers])
+  }, [loadBranches, loadUsers])
 
   async function handleCreateUser(e) {
     e.preventDefault()
@@ -61,6 +84,9 @@ export default function UserManagement({ adminUser }) {
       return
     }
 
+    const targetBranch = isMudur ? adminUser.branch_id : (selectedBranch || null)
+    const targetRole = isMudur ? 'rep' : role
+
     setCreating(true)
     try {
       const { error: rpcError } = await supabase.rpc('admin_create_user', {
@@ -68,17 +94,18 @@ export default function UserManagement({ adminUser }) {
         p_username: username.trim(),
         p_full_name: fullName.trim(),
         p_password: password,
-        p_role: role,
+        p_role: targetRole,
+        p_branch_id: targetBranch,
       })
       if (rpcError) throw rpcError
 
-      setSuccess(`"${fullName.trim()}" (${username.trim().toLowerCase()}) oluşturuldu.`)
+      setSuccess(`"${fullName.trim()}" (@${username.trim().toLowerCase()}) başarıyla oluşturuldu.`)
       setFullName('')
       setUsername('')
       setPassword('')
-      setRole('rep')
+      if (!isMudur) setRole('rep')
       await loadUsers()
-      setTimeout(() => setSuccess(''), 4000)
+      setTimeout(() => setSuccess(''), 4500)
     } catch (err) {
       setError(err.message || 'Kullanıcı oluşturulamadı.')
     } finally {
@@ -117,10 +144,10 @@ export default function UserManagement({ adminUser }) {
       })
       if (rpcError) throw rpcError
 
-      setSuccess(`"${resetTarget.full_name}" şifresi güncellendi.`)
+      setSuccess(`"${resetTarget.full_name}" kullanıcısının şifresi başarıyla güncellendi.`)
       setResetTarget(null)
       setNewPassword('')
-      setTimeout(() => setSuccess(''), 4000)
+      setTimeout(() => setSuccess(''), 4500)
     } catch (err) {
       setError(err.message || 'Şifre sıfırlanamadı.')
     } finally {
@@ -130,7 +157,7 @@ export default function UserManagement({ adminUser }) {
 
   async function handleDeleteUser(target) {
     const confirmed = window.confirm(
-      `"${target.full_name}" (@${target.username}) kullanıcısını ve tüm check-in kayıtlarını silmek istediğinize emin misiniz?`
+      `"${target.full_name}" (@${target.username}) kullanıcısını ve tüm verilerini kalıcı olarak silmek istediğinize emin misiniz?`
     )
     if (!confirmed) return
 
@@ -160,13 +187,24 @@ export default function UserManagement({ adminUser }) {
             </div>
             <div>
               <h3 className="font-bold text-stone-900 text-base">
-                Yeni Satış Temsilcisi Ekle
+                {isMudur ? 'Şubenize Satış Temsilcisi Ekle' : 'Yeni Kullanıcı Oluştur'}
               </h3>
               <p className="text-xs text-stone-500">
-                E-posta gerekmez, sadece kullanıcı adı ve şifre belirleyin
+                {isMudur
+                  ? `${adminUser.branch_name || 'Şubeniz'} için saha personeli tanımlayın`
+                  : 'Sistem personeli ve yetki rollerini tanımlayın'}
               </p>
             </div>
           </div>
+
+          {isMudur && (
+            <div className="mb-4 p-3 rounded-2xl bg-blue-50 border border-blue-200 text-blue-900 text-xs flex items-center gap-2">
+              <Building2 className="w-4 h-4 shrink-0 text-blue-600" />
+              <span>
+                <strong>{adminUser.branch_name || 'Şubeniz'}</strong> Şube Müdürü olarak sadece kendi şubenize satış personeli açabilir ve şifre değiştirebilirsiniz.
+              </span>
+            </div>
+          )}
 
           {error && (
             <div className="mb-4 flex items-start gap-2 p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs">
@@ -191,21 +229,21 @@ export default function UserManagement({ adminUser }) {
                 type="text"
                 value={fullName}
                 onChange={(e) => setFullName(e.target.value)}
-                placeholder="Örn: Ahmet Yılmaz"
+                placeholder="Örn: Mehmet Aksoy"
                 className="w-full px-3.5 py-2.5 rounded-xl bg-stone-50 border border-stone-200 text-sm focus:outline-none focus:bg-white focus:border-[#C81D77]"
               />
             </div>
 
             <div>
               <label className="block text-xs font-semibold uppercase tracking-wider text-stone-500 mb-1">
-                Kullanıcı Adı
+                Kullanıcı Adı (Giriş için)
               </label>
               <input
                 type="text"
                 autoCapitalize="none"
                 value={username}
                 onChange={(e) => setUsername(e.target.value.replace(/\s+/g, ''))}
-                placeholder="Örn: ahmet"
+                placeholder="Örn: mehmet"
                 className="w-full px-3.5 py-2.5 rounded-xl bg-stone-50 border border-stone-200 text-sm focus:outline-none focus:bg-white focus:border-[#C81D77]"
               />
             </div>
@@ -223,19 +261,53 @@ export default function UserManagement({ adminUser }) {
               />
             </div>
 
-            <div>
-              <label className="block text-xs font-semibold uppercase tracking-wider text-stone-500 mb-1">
-                Yetki Rolü
-              </label>
-              <select
-                value={role}
-                onChange={(e) => setRole(e.target.value)}
-                className="w-full px-3.5 py-2.5 rounded-xl bg-stone-50 border border-stone-200 text-sm focus:outline-none focus:bg-white focus:border-[#C81D77]"
-              >
-                <option value="rep">Satış Temsilcisi (Konum Paylaşır)</option>
-                <option value="admin">Yönetici (Admin)</option>
-              </select>
-            </div>
+            {/* Role & Branch Selection */}
+            {!isMudur ? (
+              <>
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-wider text-stone-500 mb-1">
+                    Yetki Rolü
+                  </label>
+                  <select
+                    value={role}
+                    onChange={(e) => setRole(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-stone-50 border border-stone-200 text-sm focus:outline-none focus:bg-white focus:border-[#C81D77]"
+                  >
+                    <option value="rep">Satış Temsilcisi (Saha Ekibi)</option>
+                    <option value="mudur">Şube Müdürü (Kendi Şubesini Yönetir)</option>
+                    <option value="yonetim">Genel Yönetim (Tüm Şubeleri İzler / Raporlar)</option>
+                    <option value="admin">Sistem Yöneticisi (Admin)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-wider text-stone-500 mb-1">
+                    Bağlı Olduğu Şube
+                  </label>
+                  <select
+                    value={selectedBranch}
+                    onChange={(e) => setSelectedBranch(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-stone-50 border border-stone-200 text-sm focus:outline-none focus:bg-white focus:border-[#C81D77]"
+                  >
+                    <option value="">Şube Yok / Genel Merkez</option>
+                    {branches.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.name} ({b.city || 'Belirtilmemiş'})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </>
+            ) : (
+              <div className="p-3 bg-stone-50 rounded-xl border border-stone-200 text-xs space-y-1 text-stone-600">
+                <p>
+                  <strong>Rol:</strong> Satış Temsilcisi (Saha Ekibi)
+                </p>
+                <p>
+                  <strong>Şube:</strong> {adminUser.branch_name || 'Şubeniz'}
+                </p>
+              </div>
+            )}
 
             <button
               type="submit"
@@ -265,7 +337,9 @@ export default function UserManagement({ adminUser }) {
             <div className="flex items-center gap-2">
               <Users className="w-5 h-5 text-stone-600" />
               <h3 className="font-bold text-stone-900 text-base">
-                Kayıtlı Kullanıcılar ({users.length})
+                {isMudur
+                  ? `${adminUser.branch_name || 'Şube'} Satış Ekibi (${users.length})`
+                  : `Kayıtlı Kullanıcılar (${users.length})`}
               </h3>
             </div>
           </div>
@@ -273,6 +347,10 @@ export default function UserManagement({ adminUser }) {
           {loading ? (
             <div className="py-10 text-center text-sm text-stone-500">
               Kullanıcılar yükleniyor...
+            </div>
+          ) : users.length === 0 ? (
+            <div className="py-10 text-center text-sm text-stone-500">
+              Henüz kayıtlı kullanıcı bulunmuyor.
             </div>
           ) : (
             <div className="divide-y divide-stone-100">
@@ -288,7 +366,11 @@ export default function UserManagement({ adminUser }) {
                         className={`h-10 w-10 rounded-2xl flex items-center justify-center font-bold text-sm shrink-0 ${
                           u.role === 'admin'
                             ? 'bg-[#C81D77]/12 text-[#C81D77]'
-                            : 'bg-[#94C11F]/18 text-[#5D7B10]'
+                            : u.role === 'yonetim'
+                            ? 'bg-purple-100 text-purple-700'
+                            : u.role === 'mudur'
+                            ? 'bg-blue-100 text-blue-700'
+                            : 'bg-[#94C11F]/20 text-[#5D7B10]'
                         }`}
                       >
                         {u.full_name.slice(0, 2).toUpperCase()}
@@ -298,32 +380,60 @@ export default function UserManagement({ adminUser }) {
                           <span className="font-bold text-sm text-stone-900 truncate">
                             {u.full_name}
                           </span>
+
                           {u.role === 'admin' && (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#C81D77]/10 text-[#C81D77]">
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-[#C81D77]/10 text-[#C81D77]">
                               <Shield className="w-3 h-3" />
                               Admin
                             </span>
                           )}
+
+                          {u.role === 'yonetim' && (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-purple-100 text-purple-700">
+                              <Building2 className="w-3 h-3" />
+                              Yönetim
+                            </span>
+                          )}
+
+                          {u.role === 'mudur' && (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-blue-100 text-blue-700">
+                              <Briefcase className="w-3 h-3" />
+                              Şube Müdürü
+                            </span>
+                          )}
+
+                          {u.role === 'rep' && (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-[#94C11F]/20 text-[#49650b]">
+                              Satışçı
+                            </span>
+                          )}
+
+                          {u.branch_name && (
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-stone-100 text-stone-600 border border-stone-200">
+                              🏢 {u.branch_name}
+                            </span>
+                          )}
+
                           {!u.is_active && (
-                            <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-stone-200 text-stone-600">
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-stone-200 text-stone-600">
                               Pasif
                             </span>
                           )}
                         </div>
-                        <p className="text-xs text-stone-500 font-mono-tech">
+                        <p className="text-xs text-stone-500 font-mono-tech mt-0.5">
                           @{u.username}
                         </p>
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-1.5 shrink-0">
+                    <div className="flex items-center gap-1.5 shrink-0 self-end sm:self-center">
                       <button
                         type="button"
                         onClick={() => {
                           setResetTarget(u)
                           setNewPassword('')
                         }}
-                        title="Şifre Sıfırla"
+                        title="Şifre Değiştir"
                         className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-semibold transition cursor-pointer"
                       >
                         <KeyRound className="w-3.5 h-3.5" />
@@ -345,24 +455,27 @@ export default function UserManagement({ adminUser }) {
                             {u.is_active ? (
                               <>
                                 <UserX className="w-3.5 h-3.5" />
-                                <span>Pasife Al</span>
+                                <span>Dondur</span>
                               </>
                             ) : (
                               <>
                                 <UserCheck className="w-3.5 h-3.5" />
-                                <span>Aktifleştir</span>
+                                <span>Aktif Et</span>
                               </>
                             )}
                           </button>
 
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteUser(u)}
-                            title="Kullanıcıyı Sil"
-                            className="p-1.5 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 transition cursor-pointer"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
+                          {/* Sadece Admin Kullanıcı Silebilir; Şube Müdürü Silemez */}
+                          {!isMudur && (
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteUser(u)}
+                              title="Kullanıcıyı Sil"
+                              className="p-1.5 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 transition cursor-pointer"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
                         </>
                       )}
                     </div>

@@ -14,13 +14,14 @@ export function exportCheckInsToExcel(checkIns, filterInfo = {}, addressMap = {}
     (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
   )
 
-  // 1. Ana Detay Tablosu (Tam Açık Adresli)
+  // 1. Ana Detay Tablosu (Şube ve Tam Açık Adresli)
   const reportRows = sorted.map((item, index) => {
     const address = addressMap[item.id] || item.reverse_city || `${item.latitude.toFixed(5)}, ${item.longitude.toFixed(5)}`
     
     return {
       'Sıra': index + 1,
       'Tarih / Saat': formatDateTime(item.created_at),
+      'Şube': item.branch_name || 'Genel',
       'Satış Temsilcisi': item.full_name,
       'Kullanıcı Adı': `@${item.username}`,
       'Ziyaret Edilen Müşteri': item.customer_name,
@@ -37,6 +38,7 @@ export function exportCheckInsToExcel(checkIns, filterInfo = {}, addressMap = {}
   ws['!cols'] = [
     { wch: 6 },  // Sıra
     { wch: 18 }, // Tarih/Saat
+    { wch: 18 }, // Şube
     { wch: 22 }, // Temsilci
     { wch: 16 }, // Kullanıcı Adı
     { wch: 28 }, // Müşteri
@@ -54,6 +56,7 @@ export function exportCheckInsToExcel(checkIns, filterInfo = {}, addressMap = {}
       repSummary[item.username] = {
         'Satış Temsilcisi': item.full_name,
         'Kullanıcı Adı': `@${item.username}`,
+        'Şube': item.branch_name || 'Genel',
         'Toplam Ziyaret': 0,
         'İlk Ziyaret': item.created_at,
         'Son Ziyaret': item.created_at,
@@ -71,6 +74,7 @@ export function exportCheckInsToExcel(checkIns, filterInfo = {}, addressMap = {}
   const summaryRows = Object.values(repSummary).map((s) => ({
     'Satış Temsilcisi': s['Satış Temsilcisi'],
     'Kullanıcı Adı': s['Kullanıcı Adı'],
+    'Şube': s['Şube'],
     'Toplam Ziyaret Sayısı': s['Toplam Ziyaret'],
     'Farklı Müşteri Sayısı': s['Ziyaret Edilen Müşteriler'].length,
     'İlk Ziyaret Saati': formatDateTime(s['İlk Ziyaret']),
@@ -82,6 +86,7 @@ export function exportCheckInsToExcel(checkIns, filterInfo = {}, addressMap = {}
   wsSummary['!cols'] = [
     { wch: 22 },
     { wch: 16 },
+    { wch: 18 },
     { wch: 20 },
     { wch: 20 },
     { wch: 18 },

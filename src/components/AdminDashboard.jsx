@@ -16,6 +16,7 @@ import {
   ShieldAlert,
   Download,
   Trash2,
+  Building2,
 } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import {
@@ -40,12 +41,14 @@ import UserManagement from './UserManagement'
 export default function AdminDashboard({ user }) {
   const [activeTab, setActiveTab] = useState('tracking')
   const [checkIns, setCheckIns] = useState([])
+  const [branches, setBranches] = useState([])
   const [loading, setLoading] = useState(true)
   const [selectedId, setSelectedId] = useState(null)
   const [addressMap, setAddressMap] = useState({})
 
   // Filters
   const [searchQuery, setSearchQuery] = useState('')
+  const [branchFilter, setBranchFilter] = useState('all')
   const [repFilter, setRepFilter] = useState('all')
   const [dateFilter, setDateFilter] = useState('today')
 
@@ -62,16 +65,49 @@ export default function AdminDashboard({ user }) {
       : 'unsupported'
   )
 
+  const isYonetim = user.role === 'yonetim'
+  const isMudur = user.role === 'mudur'
+  const isAdmin = user.role === 'admin'
+
+  const loadBranches = useCallback(async () => {
+    try {
+      const { data } = await supabase.rpc('get_branches')
+      if (data) setBranches(data)
+    } catch (e) {
+      console.warn('Şubeler alınamadı:', e)
+    }
+  }, [])
+
   const loadCheckIns = useCallback(async () => {
     setLoading(true)
     try {
-      const { data, error } = await supabase
-        .from('check_ins')
-        .select('*')
-        .order('created_at', { ascending: false })
-        .limit(400)
+      // Hiyerarşik RPC fonksiyonu ile kullanıcının yetkili olduğu kayıtları çek
+      const { data, error } = await supabase.rpc('get_authorized_check_ins', {
+        p_requester_id: user.id,
+      })
 
-      if (error) throw error
+      if (error) {
+        console.warn('get_authorized_check_ins RPC hatası, doğrudan çekiliyor:', error)
+        let query = supabase
+          .from('check_ins')
+          .select('*')
+          .order('created_at', { ascending: false })
+          .limit(400)
+
+        if (isMudur && user.branch_id) {
+          query = query.eq('branch_id', user.branch_id)
+        }
+
+        const { data: fallbackData } = await query
+        const items = fallbackData || []
+        setCheckIns(items)
+        items.forEach(async (item) => {
+          const fullAddr = await getReverseGeocodeAddress(item.latitude, item.longitude)
+          setAddressMap((prev) => ({ ...prev, [item.id]: fullAddr }))
+        })
+        return
+      }
+
       const items = data || []
       setCheckIns(items)
 
@@ -84,11 +120,12 @@ export default function AdminDashboard({ user }) {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [user.id, isMudur, user.branch_id])
 
   useEffect(() => {
+    loadBranches()
     loadCheckIns()
-  }, [loadCheckIns])
+  }, [loadBranches, loadCheckIns])
 
   useEffect(() => {
     const handleFirstTouch = async () => {
@@ -112,20 +149,32 @@ export default function AdminDashboard({ user }) {
           const newRecord = payload.new
           if (!newRecord) return
 
+          // Şube Müdürü: Sadece KENDİ ŞUBESİNE ait bildirimleri kabul eder
+          if (isMudur && newRecord.branch_id && user.branch_id && newRecord.branch_id !== user.branch_id) {
+            return
+          }
+
+          // Şube adını ilişkilendir
+          const branchObj = branches.find((b) => b.id === newRecord.branch_id)
+          const enrichedRecord = {
+            ...newRecord,
+            branch_name: branchObj ? branchObj.name : newRecord.branch_name,
+          }
+
           setCheckIns((prev) => {
-            if (prev.some((c) => c.id === newRecord.id)) return prev
-            return [newRecord, ...prev]
+            if (prev.some((c) => c.id === enrichedRecord.id)) return prev
+            return [enrichedRecord, ...prev]
           })
-          setSelectedId(newRecord.id)
+          setSelectedId(enrichedRecord.id)
 
-          getReverseGeocodeAddress(newRecord.latitude, newRecord.longitude).then((addr) => {
-            setAddressMap((prev) => ({ ...prev, [newRecord.id]: addr }))
+          getReverseGeocodeAddress(enrichedRecord.latitude, enrichedRecord.longitude).then((addr) => {
+            setAddressMap((prev) => ({ ...prev, [enrichedRecord.id]: addr }))
           })
 
-          setLiveToast(newRecord)
+          setLiveToast(enrichedRecord)
           setTimeout(() => {
             setLiveToast((current) =>
-              current?.id === newRecord.id ? null : current
+              current?.id === enrichedRecord.id ? null : current
             )
           }, 9000)
 
@@ -134,8 +183,8 @@ export default function AdminDashboard({ user }) {
           }
 
           showBrowserNotification(
-            `🔔 Yeni Ziyaret: ${newRecord.full_name}`,
-            `${newRecord.customer_name}${newRecord.note ? ' — ' + newRecord.note : ''}`
+            `🔔 Yeni Ziyaret: ${enrichedRecord.full_name}${enrichedRecord.branch_name ? ` (${enrichedRecord.branch_name})` : ''}`,
+            `${enrichedRecord.customer_name}${enrichedRecord.note ? ' — ' + enrichedRecord.note : ''}`
           )
         }
       )
@@ -146,7 +195,7 @@ export default function AdminDashboard({ user }) {
     return () => {
       supabase.removeChannel(channel)
     }
-  }, [soundEnabled])
+  }, [soundEnabled, isMudur, user.branch_id, branches])
 
   async function handleRequestNotification() {
     await unlockAudio()
@@ -179,13 +228,11 @@ export default function AdminDashboard({ user }) {
     if (!ok) return
 
     try {
-      // 1. Önce doğrudan RPC fonksiyonunu çalıştır (RLS'e takılmaz)
-      const { data, error: rpcErr } = await supabase.rpc('admin_delete_check_in', {
+      const { error: rpcErr } = await supabase.rpc('admin_delete_check_in', {
         p_admin_id: user.id,
         p_check_in_id: item.id,
       })
 
-      // Eğer rpc hata verirse doğrudan DELETE dene
       if (rpcErr) {
         console.warn('RPC hatası, doğrudan delete deneniyor:', rpcErr)
         const { error: directErr } = await supabase
@@ -220,6 +267,7 @@ export default function AdminDashboard({ user }) {
 
   const filteredCheckIns = useMemo(() => {
     return checkIns.filter((item) => {
+      if (branchFilter !== 'all' && item.branch_id !== branchFilter) return false
       if (repFilter !== 'all' && item.username !== repFilter) return false
       if (dateFilter === 'today' && !isToday(item.created_at)) return false
       if (dateFilter === 'week' && !isThisWeek(item.created_at)) return false
@@ -227,13 +275,14 @@ export default function AdminDashboard({ user }) {
         const q = searchQuery.toLowerCase()
         const matchCustomer = item.customer_name.toLowerCase().includes(q)
         const matchRep = item.full_name.toLowerCase().includes(q)
+        const matchBranch = (item.branch_name || '').toLowerCase().includes(q)
         const matchNote = (item.note || '').toLowerCase().includes(q)
         const matchAddr = (addressMap[item.id] || '').toLowerCase().includes(q)
-        if (!matchCustomer && !matchRep && !matchNote && !matchAddr) return false
+        if (!matchCustomer && !matchRep && !matchBranch && !matchNote && !matchAddr) return false
       }
       return true
     })
-  }, [checkIns, repFilter, dateFilter, searchQuery, addressMap])
+  }, [checkIns, branchFilter, repFilter, dateFilter, searchQuery, addressMap])
 
   const fraudAnalysisMap = useMemo(() => {
     const map = {}
@@ -307,7 +356,7 @@ export default function AdminDashboard({ user }) {
           </div>
           <div className="min-w-0 flex-1">
             <p className="text-[11px] font-bold uppercase tracking-wider text-[#94C11F]">
-              Yeni Konum Bildirimi
+              Yeni Konum Bildirimi {liveToast.branch_name ? `• ${liveToast.branch_name}` : ''}
             </p>
             <p className="font-bold text-sm truncate mt-0.5">
               {liveToast.full_name} &rarr; {liveToast.customer_name}
@@ -345,18 +394,21 @@ export default function AdminDashboard({ user }) {
             </span>
           </button>
 
-          <button
-            type="button"
-            onClick={() => setActiveTab('users')}
-            className={`flex-1 sm:flex-initial inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition cursor-pointer ${
-              activeTab === 'users'
-                ? 'bg-white text-stone-900 shadow-xs'
-                : 'text-stone-600 hover:text-stone-900'
-            }`}
-          >
-            <Users className="w-4 h-4 text-[#C81D77]" />
-            <span>Kullanıcı Yönetimi</span>
-          </button>
+          {/* Yönetim Rolü kullanıcı yönetimi yapmaz, sadece admin ve şube müdürü görür */}
+          {!isYonetim && (
+            <button
+              type="button"
+              onClick={() => setActiveTab('users')}
+              className={`flex-1 sm:flex-initial inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition cursor-pointer ${
+                activeTab === 'users'
+                  ? 'bg-white text-stone-900 shadow-xs'
+                  : 'text-stone-600 hover:text-stone-900'
+              }`}
+            >
+              <Users className="w-4 h-4 text-[#C81D77]" />
+              <span>{isMudur ? 'Şube Ekibi & Şifre' : 'Kullanıcı Yönetimi'}</span>
+            </button>
+          )}
         </div>
 
         <div className="flex items-center justify-between sm:justify-end gap-2 flex-wrap">
@@ -408,7 +460,7 @@ export default function AdminDashboard({ user }) {
         </div>
       </div>
 
-      {activeTab === 'users' ? (
+      {activeTab === 'users' && !isYonetim ? (
         <UserManagement adminUser={user} />
       ) : (
         <div className="space-y-4">
@@ -447,10 +499,31 @@ export default function AdminDashboard({ user }) {
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Müşteri, adres, temsilci veya not ara..."
+                    placeholder="Müşteri, adres, şube veya temsilci ara..."
                     className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-stone-50 border border-stone-200 text-sm focus:outline-none focus:bg-white focus:border-[#C81D77]"
                   />
                 </div>
+
+                {/* Şube Filtresi: Admin ve Yönetim için tüm şubeler, Şube Müdürü için sabit kendi şubesi */}
+                {!isMudur ? (
+                  <select
+                    value={branchFilter}
+                    onChange={(e) => setBranchFilter(e.target.value)}
+                    className="px-3.5 py-2.5 rounded-xl bg-stone-50 border border-stone-200 text-sm font-medium text-stone-700 focus:outline-none focus:border-[#C81D77]"
+                  >
+                    <option value="all">Tüm Şubeler</option>
+                    {branches.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.name}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <div className="px-3.5 py-2.5 rounded-xl bg-blue-50 border border-blue-200 text-blue-800 text-xs font-bold inline-flex items-center gap-1.5">
+                    <Building2 className="w-3.5 h-3.5 text-blue-600" />
+                    <span>{user.branch_name || 'Şubeniz'}</span>
+                  </div>
+                )}
 
                 <select
                   value={repFilter}
@@ -551,6 +624,13 @@ export default function AdminDashboard({ user }) {
                             <span className="text-xs font-semibold text-[#C81D77]">
                               &bull; {item.full_name}
                             </span>
+
+                            {item.branch_name && (
+                              <span className="px-2 py-0.5 rounded-full text-[11px] font-medium bg-stone-100 text-stone-700 border border-stone-200">
+                                🏢 {item.branch_name}
+                              </span>
+                            )}
+
                             <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-stone-100 text-stone-600">
                               {formatRelativeTime(item.created_at)}
                             </span>
@@ -606,17 +686,20 @@ export default function AdminDashboard({ user }) {
                           <ExternalLink className="w-3.5 h-3.5" />
                         </a>
 
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            handleDeleteCheckIn(item)
-                          }}
-                          title="Bu bildirimi sil (Test/Hatalı)"
-                          className="p-2 rounded-xl bg-stone-100 hover:bg-rose-100 text-stone-400 hover:text-rose-600 transition cursor-pointer"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        {/* Yönetim Rolü bildirim silemez (salt okunur), Admin ve Şube Müdürü silebilir */}
+                        {!isYonetim && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              handleDeleteCheckIn(item)
+                            }}
+                            title="Bu bildirimi sil (Test/Hatalı)"
+                            className="p-2 rounded-xl bg-stone-100 hover:bg-rose-100 text-stone-400 hover:text-rose-600 transition cursor-pointer"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        )}
                       </div>
                     </div>
                   )
