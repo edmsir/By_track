@@ -27,25 +27,27 @@ import {
 import {
   formatDateTime,
   formatRelativeTime,
-  getGoogleMapsUrl,
+  getSmartMapsUrl,
   isToday,
   isThisWeek,
 } from '../lib/format'
 import { exportCheckInsToExcel } from '../lib/excelExport'
 import { analyzeCheckInFraud } from '../lib/fraudDetector'
+import { getReverseGeocodeAddress } from '../lib/geocode'
 import AdminMap from './AdminMap'
 import UserManagement from './UserManagement'
 
 export default function AdminDashboard({ user }) {
-  const [activeTab, setActiveTab] = useState('tracking') // 'tracking' | 'users'
+  const [activeTab, setActiveTab] = useState('tracking')
   const [checkIns, setCheckIns] = useState([])
   const [loading, setLoading] = useState(true)
   const [selectedId, setSelectedId] = useState(null)
+  const [addressMap, setAddressMap] = useState({})
 
   // Filters
   const [searchQuery, setSearchQuery] = useState('')
   const [repFilter, setRepFilter] = useState('all')
-  const [dateFilter, setDateFilter] = useState('today') // Varsayılan: Bugün
+  const [dateFilter, setDateFilter] = useState('today')
 
   // Route & Sound states
   const [showRoute, setShowRoute] = useState(true)
@@ -70,7 +72,13 @@ export default function AdminDashboard({ user }) {
         .limit(400)
 
       if (error) throw error
-      setCheckIns(data || [])
+      const items = data || []
+      setCheckIns(items)
+
+      items.forEach(async (item) => {
+        const fullAddr = await getReverseGeocodeAddress(item.latitude, item.longitude)
+        setAddressMap((prev) => ({ ...prev, [item.id]: fullAddr }))
+      })
     } catch (err) {
       console.error('Check-in verileri yüklenemedi:', err)
     } finally {
@@ -109,6 +117,10 @@ export default function AdminDashboard({ user }) {
             return [newRecord, ...prev]
           })
           setSelectedId(newRecord.id)
+
+          getReverseGeocodeAddress(newRecord.latitude, newRecord.longitude).then((addr) => {
+            setAddressMap((prev) => ({ ...prev, [newRecord.id]: addr }))
+          })
 
           setLiveToast(newRecord)
           setTimeout(() => {
@@ -159,7 +171,6 @@ export default function AdminDashboard({ user }) {
     }
   }
 
-  // Bildirim Yönetimi: Tekil Silme
   async function handleDeleteCheckIn(item) {
     const ok = window.confirm(
       `"${item.customer_name}" (${item.full_name}) bildirimini silmek istediğinize emin misiniz?`
@@ -169,7 +180,6 @@ export default function AdminDashboard({ user }) {
     try {
       const { error: directErr } = await supabase.from('check_ins').delete().eq('id', item.id)
       if (directErr) {
-        // Fallback rpc
         const { error: rpcErr } = await supabase.rpc('admin_delete_check_in', {
           p_admin_id: user.id,
           p_check_in_id: item.id,
@@ -208,13 +218,13 @@ export default function AdminDashboard({ user }) {
         const matchCustomer = item.customer_name.toLowerCase().includes(q)
         const matchRep = item.full_name.toLowerCase().includes(q)
         const matchNote = (item.note || '').toLowerCase().includes(q)
-        if (!matchCustomer && !matchRep && !matchNote) return false
+        const matchAddr = (addressMap[item.id] || '').toLowerCase().includes(q)
+        if (!matchCustomer && !matchRep && !matchNote && !matchAddr) return false
       }
       return true
     })
-  }, [checkIns, repFilter, dateFilter, searchQuery])
+  }, [checkIns, repFilter, dateFilter, searchQuery, addressMap])
 
-  // Sahte GPS & Işınlanma Analiz Haritası
   const fraudAnalysisMap = useMemo(() => {
     const map = {}
     const sorted = [...checkIns].sort(
@@ -237,10 +247,11 @@ export default function AdminDashboard({ user }) {
 
   function handleExportExcel() {
     try {
-      exportCheckInsToExcel(filteredCheckIns, {
-        rep: repFilter,
-        date: dateFilter,
-      })
+      exportCheckInsToExcel(
+        filteredCheckIns,
+        { rep: repFilter, date: dateFilter },
+        addressMap
+      )
     } catch (err) {
       alert(err.message || 'Excel oluşturulamadı.')
     }
@@ -248,7 +259,6 @@ export default function AdminDashboard({ user }) {
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-5 space-y-5">
-      {/* Tarayıcı Bildirim İzni Banner'ı */}
       {notifPermission !== 'granted' && (
         <div className="bg-gradient-to-r from-[#C81D77] to-[#8c1050] text-white p-3.5 sm:p-4 rounded-2xl shadow-md flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="flex items-center gap-3">
@@ -274,14 +284,12 @@ export default function AdminDashboard({ user }) {
         </div>
       )}
 
-      {/* Action Notification */}
       {actionMsg && (
         <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs font-semibold rounded-xl">
           {actionMsg}
         </div>
       )}
 
-      {/* Live Incoming Toast */}
       {liveToast && (
         <div className="fixed bottom-4 right-4 left-4 sm:left-auto sm:w-96 z-50 bg-stone-900 text-white rounded-2xl p-4 shadow-2xl border border-[#C81D77]/40 flex items-start gap-3 animate-bounce">
           <div className="h-10 w-10 rounded-xl bg-[#C81D77] flex items-center justify-center shrink-0">
@@ -310,7 +318,6 @@ export default function AdminDashboard({ user }) {
 
       {/* Top Controls Bar */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white rounded-2xl border border-stone-200/90 p-3 sm:px-4 shadow-xs">
-        {/* Tabs */}
         <div className="flex items-center gap-1.5 bg-stone-100 p-1 rounded-xl">
           <button
             type="button"
@@ -342,7 +349,6 @@ export default function AdminDashboard({ user }) {
           </button>
         </div>
 
-        {/* Audio & Realtime Status */}
         <div className="flex items-center justify-between sm:justify-end gap-2 flex-wrap">
           <div
             className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold ${
@@ -396,7 +402,6 @@ export default function AdminDashboard({ user }) {
         <UserManagement adminUser={user} />
       ) : (
         <div className="space-y-4">
-          {/* Map Header with Route Toggle */}
           <div className="flex items-center justify-between px-1">
             <span className="text-xs font-bold uppercase tracking-wider text-stone-500">
               Günün Ziyaret Sıralaması &amp; Rota Haritası
@@ -414,18 +419,17 @@ export default function AdminDashboard({ user }) {
             </label>
           </div>
 
-          {/* Interactive Map with Routes */}
           <AdminMap
             checkIns={filteredCheckIns}
             selectedId={selectedId}
             onSelect={setSelectedId}
             showRoute={showRoute}
+            addressMap={addressMap}
           />
 
           {/* Filters, Excel Export & Feed */}
           <div className="bg-white rounded-3xl border border-stone-200/90 p-4 sm:p-6 shadow-xs space-y-4">
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-              {/* Search and Filters */}
               <div className="flex flex-wrap items-center gap-2 flex-1">
                 <div className="relative flex-1 min-w-[200px]">
                   <Search className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
@@ -433,7 +437,7 @@ export default function AdminDashboard({ user }) {
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Müşteri, temsilci veya not ara..."
+                    placeholder="Müşteri, adres, temsilci veya not ara..."
                     className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-stone-50 border border-stone-200 text-sm focus:outline-none focus:bg-white focus:border-[#C81D77]"
                   />
                 </div>
@@ -462,14 +466,13 @@ export default function AdminDashboard({ user }) {
                 </select>
               </div>
 
-              {/* Action Buttons: Excel + Refresh */}
               <div className="flex items-center gap-2 shrink-0 flex-wrap">
                 <button
                   type="button"
                   onClick={handleExportExcel}
                   disabled={filteredCheckIns.length === 0}
                   className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-sm transition disabled:opacity-50 cursor-pointer"
-                  title="Görüntülenen kayıtları Excel olarak indir"
+                  title="Görüntülenen kayıtları detaylı adresleriyle Excel olarak indir"
                 >
                   <FileSpreadsheet className="w-4 h-4" />
                   <span>Excel Raporu</span>
@@ -504,6 +507,7 @@ export default function AdminDashboard({ user }) {
                   const isSelected = selectedId === item.id
                   const fraudInfo = fraudAnalysisMap[item.id] || {}
                   const hasFraud = fraudInfo.isSuspicious
+                  const displayAddress = addressMap[item.id] || item.reverse_city || 'Adres belirleniyor...'
 
                   return (
                     <div
@@ -549,7 +553,11 @@ export default function AdminDashboard({ user }) {
                             )}
                           </div>
 
-                          {/* Sahte GPS Açıklaması */}
+                          <div className="flex items-center gap-1.5 text-xs text-stone-700 font-medium">
+                            <MapPin className="w-3.5 h-3.5 text-[#C81D77] shrink-0" />
+                            <span className="truncate">{displayAddress}</span>
+                          </div>
+
                           {hasFraud && fraudInfo.flags && (
                             <div className="p-2 rounded-lg bg-rose-100/80 border border-rose-300 text-rose-900 text-xs font-medium space-y-0.5">
                               {fraudInfo.flags.map((flag, fIdx) => (
@@ -560,7 +568,7 @@ export default function AdminDashboard({ user }) {
 
                           {item.note && (
                             <p className="text-xs sm:text-sm text-stone-600">
-                              {item.note}
+                              💬 {item.note}
                             </p>
                           )}
 
@@ -568,9 +576,6 @@ export default function AdminDashboard({ user }) {
                             <span className="inline-flex items-center gap-1">
                               <Clock className="w-3.5 h-3.5" />
                               {formatDateTime(item.created_at)}
-                            </span>
-                            <span className="font-mono-tech text-[11px]">
-                              {item.latitude.toFixed(5)}, {item.longitude.toFixed(5)}
                             </span>
                             {item.accuracy && (
                               <span className="text-[11px]">±{Math.round(item.accuracy)}m hassasiyet</span>
@@ -581,7 +586,7 @@ export default function AdminDashboard({ user }) {
 
                       <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
                         <a
-                          href={getGoogleMapsUrl(item.latitude, item.longitude)}
+                          href={getSmartMapsUrl(item.latitude, item.longitude, item.customer_name)}
                           target="_blank"
                           rel="noopener noreferrer"
                           onClick={(e) => e.stopPropagation()}

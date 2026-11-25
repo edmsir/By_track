@@ -1,0 +1,22 @@
+{
+  "name": "by Fabric Saha Takip",
+  "short_name": "by Fabric",
+  "description": "by Fabric Saha Satış ve Ziyaret Takip Sistemi",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#FAF9F6",
+  "theme_color": "#C81D77",
+  "icons": [
+    {
+      "src": "/app-icon.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/logo.png",
+      "sizes": "278x116",
+      "type": "image/png"
+    }
+  ]
+}

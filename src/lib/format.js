@@ -22,6 +22,28 @@ export function formatRelativeTime(isoString) {
   return `${diffDays} gün önce`
 }
 
+/**
+ * Cihaz Apple (iPhone, iPad, Mac) ise doğrudan yerel 'Apple Haritalar' (Apple Maps) uygulamasını açar.
+ * Android veya Windows ise 'Google Haritalar' açar.
+ */
+export function getSmartMapsUrl(lat, lng, label = '') {
+  if (typeof navigator === 'undefined') {
+    return `https://www.google.com/maps?q=${lat},${lng}`
+  }
+
+  const isApple =
+    /iPad|iPhone|iPod|Macintosh/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+
+  if (isApple) {
+    // maps.apple.com linki iOS'ta doğrudan Apple Haritalar uygulamasını fırlatır
+    const query = label ? encodeURIComponent(label) : `${lat},${lng}`
+    return `https://maps.apple.com/?q=${query}&ll=${lat},${lng}`
+  }
+
+  return `https://www.google.com/maps?q=${lat},${lng}`
+}
+
 export function getGoogleMapsUrl(lat, lng) {
   return `https://www.google.com/maps?q=${lat},${lng}`
 }

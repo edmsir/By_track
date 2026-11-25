@@ -2,33 +2,33 @@ import * as XLSX from 'xlsx'
 import { formatDateTime, getGoogleMapsUrl } from './format'
 
 /**
- * Filtrelenen check-in kayıtlarını kurumsal Excel formatında dışa aktarır.
- * Her satırda sıra no, temsilci, müşteri adı, tarih/saat, not, koordinatlar,
- * Google Harita bağlantısı ve Google Maps rota linkleri yer alır.
+ * Filtrelenen check-in kayıtlarını açık sokak/ilçe/şehir adresleriyle kurumsal Excel'e aktarır.
  */
-export function exportCheckInsToExcel(checkIns, filterInfo = {}) {
+export function exportCheckInsToExcel(checkIns, filterInfo = {}, addressMap = {}) {
   if (!checkIns || checkIns.length === 0) {
     throw new Error('Dışa aktarılacak check-in kaydı bulunamadı.')
   }
 
-  // Kronolojik sıralama (Günün ilk ziyaretinden son ziyaretine)
+  // Kronolojik sıralama
   const sorted = [...checkIns].sort(
     (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
   )
 
-  // 1. Ana Detay Tablosu
-  const reportRows = sorted.map((item, index) => ({
-    'Sıra': index + 1,
-    'Tarih / Saat': formatDateTime(item.created_at),
-    'Satış Temsilcisi': item.full_name,
-    'Kullanıcı Adı': `@${item.username}`,
-    'Ziyaret Edilen Müşteri': item.customer_name,
-    'Ziyaret Notu': item.note || '-',
-    'Enlem (Lat)': Number(item.latitude.toFixed(6)),
-    'Boylam (Lng)': Number(item.longitude.toFixed(6)),
-    'GPS Hassasiyeti (m)': item.accuracy ? `±${Math.round(item.accuracy)}m` : 'Bilinmiyor',
-    'Google Haritada Gör': getGoogleMapsUrl(item.latitude, item.longitude),
-  }))
+  // 1. Ana Detay Tablosu (Tam Açık Adresli)
+  const reportRows = sorted.map((item, index) => {
+    const address = addressMap[item.id] || item.reverse_city || `${item.latitude.toFixed(5)}, ${item.longitude.toFixed(5)}`
+    
+    return {
+      'Sıra': index + 1,
+      'Tarih / Saat': formatDateTime(item.created_at),
+      'Satış Temsilcisi': item.full_name,
+      'Kullanıcı Adı': `@${item.username}`,
+      'Ziyaret Edilen Müşteri': item.customer_name,
+      'Ziyaret Notu': item.note || '-',
+      'Ziyaret Adresi (Cadde / İlçe / Şehir)': address,
+      'Google Haritada Gör': getGoogleMapsUrl(item.latitude, item.longitude),
+    }
+  })
 
   const wb = XLSX.utils.book_new()
   const ws = XLSX.utils.json_to_sheet(reportRows)
@@ -39,12 +39,10 @@ export function exportCheckInsToExcel(checkIns, filterInfo = {}) {
     { wch: 18 }, // Tarih/Saat
     { wch: 22 }, // Temsilci
     { wch: 16 }, // Kullanıcı Adı
-    { wch: 26 }, // Müşteri
+    { wch: 28 }, // Müşteri
     { wch: 32 }, // Not
-    { wch: 13 }, // Enlem
-    { wch: 13 }, // Boylam
-    { wch: 18 }, // Hassasiyet
-    { wch: 48 }, // Harita Linki
+    { wch: 45 }, // Açık Adres
+    { wch: 45 }, // Harita Linki
   ]
 
   XLSX.utils.book_append_sheet(wb, ws, 'Ziyaret Raporu')
@@ -88,11 +86,10 @@ export function exportCheckInsToExcel(checkIns, filterInfo = {}) {
     { wch: 20 },
     { wch: 18 },
     { wch: 18 },
-    { wch: 50 },
+    { wch: 55 },
   ]
   XLSX.utils.book_append_sheet(wb, wsSummary, 'Temsilci Özeti')
 
-  // Dosya adı üret (byFabric_Ziyaret_Raporu_2026-11-25.xlsx)
   const dateStr = new Date().toISOString().split('T')[0]
   const repTag = filterInfo.rep && filterInfo.rep !== 'all' ? `_${filterInfo.rep}` : ''
   const filename = `byFabric_Ziyaret_Raporu${repTag}_${dateStr}.xlsx`

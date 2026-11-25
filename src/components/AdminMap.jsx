@@ -1,31 +1,55 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import L from 'leaflet'
-import { formatDateTime, getGoogleMapsUrl } from '../lib/format'
+import { Maximize2, Minimize2, Eye, EyeOff } from 'lucide-react'
+import { formatDateTime, getSmartMapsUrl } from '../lib/format'
 
-function createNumberedPinIcon(stepNumber, isLatest) {
+function createNumberedPinIcon(stepNumber, isLatest, repName, customerName, showDetails) {
+  const shortRep = repName ? repName.split(' ')[0] : ''
+  const safeCustomer = (customerName || '').slice(0, 16)
+
   return L.divIcon({
     className: 'custom-byfabric-pin',
-    html: isLatest
-      ? `<div style="position:relative;width:34px;height:34px;display:flex;align-items:center;justify-content:center;">
-           <span style="position:absolute;inset:0;border-radius:9999px;background:#C81D77;opacity:0.4;animation:pulse-ring 2s infinite;"></span>
-           <span style="width:26px;height:26px;border-radius:9999px;background:#C81D77;color:#ffffff;font-size:12px;font-weight:800;display:flex;align-items:center;justify-content:center;border:2.5px solid #ffffff;box-shadow:0 4px 12px rgba(200,29,119,0.5);">
-             ${stepNumber}
-           </span>
-         </div>`
-      : `<div style="width:24px;height:24px;border-radius:9999px;background:#94C11F;color:#ffffff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;border:2px solid #ffffff;box-shadow:0 2px 8px rgba(0,0,0,0.25);">
-           ${stepNumber}
-         </div>`,
-    iconSize: isLatest ? [34, 34] : [24, 24],
-    iconAnchor: isLatest ? [17, 17] : [12, 12],
+    html: `
+      <div style="position:relative;display:flex;flex-direction:column;align-items:center;">
+        ${
+          showDetails
+            ? `<div style="margin-bottom:4px;white-space:nowrap;background:rgba(24,24,27,0.92);backdrop-filter:blur(4px);color:#ffffff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:6px;box-shadow:0 3px 10px rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.15);pointer-events:none;transform:translateY(-2px);">
+                 <span style="color:#94C11F;">${shortRep}:</span> ${safeCustomer}
+               </div>`
+            : ''
+        }
+        <div style="position:relative;width:${isLatest ? 34 : 26}px;height:${isLatest ? 34 : 26}px;display:flex;align-items:center;justify-content:center;">
+          ${
+            isLatest
+              ? `<span style="position:absolute;inset:0;border-radius:9999px;background:#C81D77;opacity:0.4;animation:pulse-ring 2s infinite;"></span>`
+              : ''
+          }
+          <span style="width:${isLatest ? 26 : 22}px;height:${isLatest ? 26 : 22}px;border-radius:9999px;background:${isLatest ? '#C81D77' : '#94C11F'};color:#ffffff;font-size:${isLatest ? 12 : 11}px;font-weight:800;display:flex;align-items:center;justify-content:center;border:2px solid #ffffff;box-shadow:0 3px 8px rgba(0,0,0,0.3);">
+            ${stepNumber}
+          </span>
+        </div>
+      </div>
+    `,
+    iconSize: [showDetails ? 120 : 34, showDetails ? 56 : 34],
+    iconAnchor: [showDetails ? 60 : 17, showDetails ? 48 : 17],
   })
 }
 
-export default function AdminMap({ checkIns, selectedId, onSelect, showRoute = true }) {
+export default function AdminMap({
+  checkIns,
+  selectedId,
+  onSelect,
+  showRoute = true,
+  addressMap = {},
+}) {
   const containerRef = useRef(null)
   const mapRef = useRef(null)
   const markersLayerRef = useRef(null)
   const routeLayerRef = useRef(null)
   const markerByIdRef = useRef({})
+
+  const [isFullscreen, setIsFullscreen] = useState(false)
+  const [showPinDetails, setShowPinDetails] = useState(false)
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return
@@ -33,8 +57,10 @@ export default function AdminMap({ checkIns, selectedId, onSelect, showRoute = t
     const map = L.map(containerRef.current, {
       center: [41.0082, 28.9784],
       zoom: 12,
-      zoomControl: true,
+      zoomControl: false,
     })
+
+    L.control.zoom({ position: 'topright' }).addTo(map)
 
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '&copy; OpenStreetMap',
@@ -65,12 +91,10 @@ export default function AdminMap({ checkIns, selectedId, onSelect, showRoute = t
 
     if (checkIns.length === 0) return
 
-    // Kronolojik sıralama (Günün 1. ziyaretinden son ziyaretine)
     const chronological = [...checkIns].sort(
       (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
     )
 
-    // Temsilci bazında yolları ve ziyaret sırasını ayır
     const repGroups = {}
     chronological.forEach((item) => {
       if (!repGroups[item.username]) {
@@ -81,13 +105,10 @@ export default function AdminMap({ checkIns, selectedId, onSelect, showRoute = t
 
     const bounds = []
 
-    // 1. Rota Çizgileri (Polyline)
     if (showRoute) {
       Object.entries(repGroups).forEach(([, items]) => {
         if (items.length > 1) {
           const latlngs = items.map((i) => [i.latitude, i.longitude])
-          
-          // Gölge / Vurgu çizgisi
           L.polyline(latlngs, {
             color: '#C81D77',
             weight: 5,
@@ -96,7 +117,6 @@ export default function AdminMap({ checkIns, selectedId, onSelect, showRoute = t
             lineJoin: 'round',
           }).addTo(routeLayer)
 
-          // İnce kılavuz çizgi
           L.polyline(latlngs, {
             color: '#94C11F',
             weight: 2,
@@ -106,43 +126,42 @@ export default function AdminMap({ checkIns, selectedId, onSelect, showRoute = t
       })
     }
 
-    // 2. Numaralandırılmış Ziyaret Noktaları
     Object.entries(repGroups).forEach(([, items]) => {
       const totalInRep = items.length
       items.forEach((item, index) => {
         const stepNum = index + 1
         const isLatest = index === totalInRep - 1
         const marker = L.marker([item.latitude, item.longitude], {
-          icon: createNumberedPinIcon(stepNum, isLatest),
+          icon: createNumberedPinIcon(
+            stepNum,
+            isLatest,
+            item.full_name,
+            item.customer_name,
+            showPinDetails
+          ),
         })
 
-        const escapedCustomer = item.customer_name
-          .replace(/&/g, '&amp;')
-          .replace(/</g, '&lt;')
-          .replace(/>/g, '&gt;')
-        const escapedRep = item.full_name
-          .replace(/&/g, '&amp;')
-          .replace(/</g, '&lt;')
-          .replace(/>/g, '&gt;')
-        const escapedNote = item.note
-          ? item.note.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-          : ''
+        const displayAddress =
+          addressMap[item.id] || item.reverse_city || 'Adres yükleniyor...'
 
         marker.bindPopup(`
-          <div style="min-width:210px;font-family:'Plus Jakarta Sans',sans-serif;">
+          <div style="min-width:220px;font-family:'Plus Jakarta Sans',sans-serif;">
             <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
-              <span style="font-size:11px;font-weight:800;color:#C81D77;text-transform:uppercase;letter-spacing:0.04em;">${escapedRep}</span>
+              <span style="font-size:11px;font-weight:800;color:#C81D77;text-transform:uppercase;">${item.full_name}</span>
               <span style="background:#C81D77;color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:9999px;">Ziyaret #${stepNum}</span>
             </div>
-            <div style="font-size:15px;font-weight:700;color:#1c1917;margin-top:4px;">${escapedCustomer}</div>
-            ${escapedNote ? `<div style="font-size:12px;color:#57534e;margin-top:4px;background:#f5f5f4;padding:6px;border-radius:8px;">${escapedNote}</div>` : ''}
+            <div style="font-size:15px;font-weight:700;color:#1c1917;margin-top:4px;">${item.customer_name}</div>
+            <div style="font-size:11px;color:#44403c;margin-top:4px;background:#f5f5f4;padding:6px;border-radius:8px;line-height:1.4;">
+              📍 <strong>Adres:</strong> ${displayAddress}
+            </div>
+            ${item.note ? `<div style="font-size:11px;color:#78716c;margin-top:4px;">💬 ${item.note}</div>` : ''}
             <div style="font-size:11px;color:#78716c;margin-top:6px;">🕒 ${formatDateTime(item.created_at)}</div>
             <div style="margin-top:8px;padding-top:6px;border-top:1px solid #e7e5e4;display:flex;align-items:center;justify-content:space-between;">
-              <a href="${getGoogleMapsUrl(item.latitude, item.longitude)}" target="_blank" rel="noopener noreferrer"
+              <a href="${getSmartMapsUrl(item.latitude, item.longitude, item.customer_name)}" target="_blank" rel="noopener noreferrer"
                  style="font-size:12px;font-weight:700;color:#C81D77;text-decoration:none;">
-                Google Maps &rarr;
+                Haritada Aç &rarr;
               </a>
-              ${isLatest ? '<span style="font-size:10px;color:#94C11F;font-weight:700;">● Son Konum</span>' : ''}
+              ${isLatest ? '<span style="font-size:10px;color:#94C11F;font-weight:700;">● Son Nokta</span>' : ''}
             </div>
           </div>
         `)
@@ -162,7 +181,7 @@ export default function AdminMap({ checkIns, selectedId, onSelect, showRoute = t
     } else if (bounds.length > 1) {
       map.fitBounds(bounds, { padding: [50, 50], maxZoom: 15 })
     }
-  }, [checkIns, onSelect, showRoute])
+  }, [checkIns, onSelect, showRoute, showPinDetails, addressMap])
 
   useEffect(() => {
     if (!selectedId || !mapRef.current) return
@@ -176,9 +195,59 @@ export default function AdminMap({ checkIns, selectedId, onSelect, showRoute = t
     }
   }, [selectedId])
 
+  useEffect(() => {
+    if (mapRef.current) {
+      setTimeout(() => {
+        mapRef.current?.invalidateSize()
+      }, 250)
+    }
+  }, [isFullscreen])
+
   return (
-    <div className="relative w-full h-[380px] sm:h-[460px] rounded-3xl overflow-hidden border border-stone-200/90 bg-stone-100 shadow-sm">
+    <div
+      className={`relative w-full rounded-3xl overflow-hidden border border-stone-200/90 bg-stone-100 shadow-sm transition-all duration-300 ${
+        isFullscreen
+          ? 'fixed inset-0 z-50 rounded-none h-screen w-screen border-none'
+          : 'h-[400px] sm:h-[480px]'
+      }`}
+    >
       <div ref={containerRef} className="w-full h-full z-0" />
+
+      {/* Harita Üstü Butonlar */}
+      <div className="absolute top-4 left-4 z-10 flex items-center gap-2 flex-wrap">
+        <button
+          type="button"
+          onClick={() => setShowPinDetails(!showPinDetails)}
+          className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold shadow-md backdrop-blur-md transition cursor-pointer ${
+            showPinDetails
+              ? 'bg-[#C81D77] text-white shadow-[#C81D77]/25'
+              : 'bg-white/90 hover:bg-white text-stone-700'
+          }`}
+          title="Tüm temsilci ve müşteri adlarını harita üzerinde doğrudan göster"
+        >
+          {showPinDetails ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+          <span>{showPinDetails ? 'Nokta Detayları Açık' : 'Nokta Detaylarını Göster'}</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setIsFullscreen(!isFullscreen)}
+          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white/90 hover:bg-white text-stone-800 text-xs font-bold shadow-md backdrop-blur-md transition cursor-pointer"
+        >
+          {isFullscreen ? (
+            <>
+              <Minimize2 className="w-4 h-4 text-stone-600" />
+              <span>Normal Boyut</span>
+            </>
+          ) : (
+            <>
+              <Maximize2 className="w-4 h-4 text-[#C81D77]" />
+              <span>Tam Ekran Harita</span>
+            </>
+          )}
+        </button>
+      </div>
+
       {checkIns.length === 0 && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-white/70 backdrop-blur-[2px] z-10">
           <p className="text-sm font-medium text-stone-500">
