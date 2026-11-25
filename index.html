@@ -16,6 +16,21 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="apple-mobile-web-app-title" content="by Fabric" />
 
+    <!-- Netlify Badge Zorla Gizleme -->
+    <style>
+      iframe[src*="netlify"],
+      [data-netlify-deploy-id],
+      .netlify-badge,
+      #netlify-drawer-container,
+      div[class*="netlify-drawer"],
+      a[href*="netlify.com"][class*="badge"] {
+        display: none !important;
+        visibility: hidden !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+      }
+    </style>
+
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -26,5 +41,26 @@
   <body class="bg-[#FAF9F6] text-stone-900 antialiased selection:bg-[#C81D77]/15 selection:text-[#C81D77]">
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
+    
+    <!-- Netlify Enjekte Ederse Anında DOM'dan Temizleyen Script -->
+    <script>
+      (function() {
+        const removeNetlifyElements = () => {
+          document.querySelectorAll('iframe, div, a').forEach(el => {
+            if (
+              el.innerText?.includes('Powered by Netlify') ||
+              el.className?.toString().includes('netlify') ||
+              el.id?.toString().includes('netlify')
+            ) {
+              el.remove();
+            }
+          });
+        };
+        window.addEventListener('DOMContentLoaded', removeNetlifyElements);
+        window.addEventListener('load', removeNetlifyElements);
+        const observer = new MutationObserver(removeNetlifyElements);
+        observer.observe(document.documentElement, { childList: true, subtree: true });
+      })();
+    </script>
   </body>
 </html>

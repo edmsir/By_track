@@ -171,6 +171,7 @@ export default function AdminDashboard({ user }) {
     }
   }
 
+  // Bildirim Yönetimi: Kesin Silme
   async function handleDeleteCheckIn(item) {
     const ok = window.confirm(
       `"${item.customer_name}" (${item.full_name}) bildirimini silmek istediğinize emin misiniz?`
@@ -178,20 +179,29 @@ export default function AdminDashboard({ user }) {
     if (!ok) return
 
     try {
-      const { error: directErr } = await supabase.from('check_ins').delete().eq('id', item.id)
-      if (directErr) {
-        const { error: rpcErr } = await supabase.rpc('admin_delete_check_in', {
-          p_admin_id: user.id,
-          p_check_in_id: item.id,
-        })
-        if (rpcErr) throw rpcErr
+      // 1. Önce doğrudan RPC fonksiyonunu çalıştır (RLS'e takılmaz)
+      const { data, error: rpcErr } = await supabase.rpc('admin_delete_check_in', {
+        p_admin_id: user.id,
+        p_check_in_id: item.id,
+      })
+
+      // Eğer rpc hata verirse doğrudan DELETE dene
+      if (rpcErr) {
+        console.warn('RPC hatası, doğrudan delete deneniyor:', rpcErr)
+        const { error: directErr } = await supabase
+          .from('check_ins')
+          .delete()
+          .eq('id', item.id)
+
+        if (directErr) throw directErr
       }
 
       setCheckIns((prev) => prev.filter((c) => c.id !== item.id))
-      setActionMsg(`"${item.customer_name}" bildirimi silindi.`)
+      setActionMsg(`"${item.customer_name}" bildirimi kalıcı olarak silindi.`)
       setTimeout(() => setActionMsg(''), 4000)
     } catch (err) {
-      alert(err.message || 'Bildirim silinemedi.')
+      console.error('Silme hatası:', err)
+      alert('Bildirim veritabanından silinemedi: ' + (err.message || 'Yetki hatası'))
     }
   }
 

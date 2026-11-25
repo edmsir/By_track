@@ -16,6 +16,22 @@
   font-family: var(--font-mono);
 }
 
+/* Netlify Badge & Feedback Drawer Gizleme */
+iframe[src*="netlify"],
+[data-netlify-deploy-id],
+.netlify-badge,
+div[class*="netlify"],
+#netlify-drawer-container,
+[aria-label*="Netlify"],
+a[href*="netlify.com"][class*="badge"],
+div:has(> a[href*="netlify.com"]) {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  z-index: -9999 !important;
+}
+
 /* Custom Leaflet popup styling */
 .leaflet-popup-content-wrapper {
   border-radius: 14px;
