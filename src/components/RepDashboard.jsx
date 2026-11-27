@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import L from 'leaflet'
 import {
   MapPin,
@@ -17,9 +17,20 @@ import {
   Map,
   List,
   Paperclip,
+  Calendar,
+  Filter,
 } from 'lucide-react'
 import { supabase } from '../lib/supabase'
-import { formatDateTime, formatRelativeTime, getSmartMapsUrl } from '../lib/format'
+import {
+  formatDateTime,
+  formatRelativeTime,
+  getSmartMapsUrl,
+  isToday,
+  isThisWeek,
+  isInDateRange,
+  todayDateStr,
+  daysAgoDateStr,
+} from '../lib/format'
 import { getReverseGeocodeAddress } from '../lib/geocode'
 import { compressImageFile } from '../lib/imageCompressor'
 
@@ -33,6 +44,18 @@ const DOCUMENT_TYPES = [
   'Ziyaret Kartı',
   'Diğer Belge',
 ]
+
+function isYesterday(isoString) {
+  if (!isoString) return false
+  const d = new Date(isoString)
+  const y = new Date()
+  y.setDate(y.getDate() - 1)
+  return (
+    d.getFullYear() === y.getFullYear() &&
+    d.getMonth() === y.getMonth() &&
+    d.getDate() === y.getDate()
+  )
+}
 
 export default function RepDashboard({ user }) {
   const [customerName, setCustomerName] = useState('')
@@ -54,6 +77,11 @@ export default function RepDashboard({ user }) {
   const [addressMap, setAddressMap] = useState({})
   const [activePanel, setActivePanel] = useState('checkin') // 'checkin' | 'map' | 'history'
 
+  // Tarih Filtresi: Varsayılan olarak "today" (Bugün)
+  const [dateFilter, setDateFilter] = useState('today') // 'today' | 'yesterday' | 'week' | 'all' | 'custom'
+  const [customStart, setCustomStart] = useState(daysAgoDateStr(7))
+  const [customEnd, setCustomEnd] = useState(todayDateStr())
+
   // Kendi konum haritası
   const mapContainerRef = useRef(null)
   const myMapRef = useRef(null)
@@ -67,9 +95,11 @@ export default function RepDashboard({ user }) {
       if (fetchError) {
         // Fallback
         const { data: d2 } = await supabase
-          .from('check_ins').select('*')
+          .from('check_ins')
+          .select('*')
           .eq('user_id', user.id)
-          .order('created_at', { ascending: false }).limit(50)
+          .order('created_at', { ascending: false })
+          .limit(300)
         const items = d2 || []
         setCheckIns(items)
         items.forEach(async (item) => {
@@ -96,56 +126,116 @@ export default function RepDashboard({ user }) {
     loadMyCheckIns()
   }, [loadMyCheckIns])
 
-  // Kendi konum haritasını oluştur/güncelle
+  // Filtrelenmiş Check-in'ler
+  const filteredCheckIns = useMemo(() => {
+    return checkIns.filter((item) => {
+      if (dateFilter === 'today') return isToday(item.created_at)
+      if (dateFilter === 'yesterday') return isYesterday(item.created_at)
+      if (dateFilter === 'week') return isThisWeek(item.created_at)
+      if (dateFilter === 'custom') return isInDateRange(item.created_at, customStart, customEnd)
+      return true // 'all'
+    })
+  }, [checkIns, dateFilter, customStart, customEnd])
+
+  // Component unmount olduğunda haritayı temizle
   useEffect(() => {
-    if (activePanel !== 'map') return
-    setTimeout(() => {
-      if (!mapContainerRef.current) return
-
-      if (!myMapRef.current) {
-        const map = L.map(mapContainerRef.current, {
-          center: [39.9, 32.8],
-          zoom: 6,
-          zoomControl: true,
-        })
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-          attribution: '&copy; OpenStreetMap',
-          maxZoom: 19,
-        }).addTo(map)
-        myMapRef.current = map
+    return () => {
+      if (myMapRef.current) {
+        myMapRef.current.remove()
+        myMapRef.current = null
       }
+    }
+  }, [])
 
-      const map = myMapRef.current
-      map.eachLayer((layer) => { if (layer instanceof L.Marker || layer instanceof L.Polyline) map.removeLayer(layer) })
+  // Kendi konum haritasını oluştur ve güncelle
+  useEffect(() => {
+    if (!mapContainerRef.current) return
 
-      const sorted = [...checkIns].sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
-      const bounds = []
-
-      sorted.forEach((item, idx) => {
-        const isLast = idx === sorted.length - 1
-        const icon = L.divIcon({
-          className: '',
-          html: `<div style="width:${isLast?28:22}px;height:${isLast?28:22}px;border-radius:9999px;background:${isLast?'#C81D77':'#94C11F'};color:#fff;font-size:11px;font-weight:800;display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,0.3);">${idx+1}</div>`,
-          iconSize: [isLast ? 28 : 22, isLast ? 28 : 22],
-          iconAnchor: [isLast ? 14 : 11, isLast ? 14 : 11],
-        })
-        const addr = addressMap[item.id] || item.reverse_city || ''
-        const marker = L.marker([item.latitude, item.longitude], { icon })
-          .bindPopup(`<strong>${item.customer_name}</strong><br/><small>${addr}</small><br/><small>${formatDateTime(item.created_at)}</small>`)
-        marker.addTo(map)
-        bounds.push([item.latitude, item.longitude])
+    // Harita örneği yoksa oluştur
+    if (!myMapRef.current) {
+      const map = L.map(mapContainerRef.current, {
+        center: [39.9, 32.8],
+        zoom: 6,
+        zoomControl: true,
       })
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap',
+        maxZoom: 19,
+      }).addTo(map)
+      myMapRef.current = map
+    }
 
-      if (sorted.length > 1) {
-        L.polyline(bounds, { color: '#C81D77', weight: 3, opacity: 0.7, dashArray: '6,6' }).addTo(map)
+    const map = myMapRef.current
+
+    // Panel 'map' ise Leaflet boyutunu tazeleyip hizala (sekme geçişlerindeki yüklenmeme sorununu çözer)
+    if (activePanel === 'map') {
+      setTimeout(() => {
+        map.invalidateSize()
+      }, 50)
+      setTimeout(() => {
+        map.invalidateSize()
+      }, 250)
+    }
+
+    // Eski marker ve polylineleri temizle
+    map.eachLayer((layer) => {
+      if (layer instanceof L.Marker || layer instanceof L.Polyline) {
+        map.removeLayer(layer)
       }
+    })
 
-      if (bounds.length === 1) map.setView(bounds[0], 15)
-      else if (bounds.length > 1) map.fitBounds(bounds, { padding: [30, 30], maxZoom: 15 })
+    const sorted = [...filteredCheckIns].sort(
+      (a, b) => new Date(a.created_at) - new Date(b.created_at)
+    )
+    const bounds = []
 
-      setTimeout(() => myMapRef.current?.invalidateSize(), 150)
-    }, 100)
-  }, [activePanel, checkIns, addressMap])
+    sorted.forEach((item, idx) => {
+      const isLast = idx === sorted.length - 1
+      const icon = L.divIcon({
+        className: '',
+        html: `<div style="width:${isLast ? 28 : 22}px;height:${
+          isLast ? 28 : 22
+        }px;border-radius:9999px;background:${
+          isLast ? '#C81D77' : '#94C11F'
+        };color:#fff;font-size:11px;font-weight:800;display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,0.3);">${
+          idx + 1
+        }</div>`,
+        iconSize: [isLast ? 28 : 22, isLast ? 28 : 22],
+        iconAnchor: [isLast ? 14 : 11, isLast ? 14 : 11],
+      })
+      const addr = addressMap[item.id] || item.reverse_city || ''
+      const docBadge = item.document_type
+        ? `<br/><span style="color:#b45309;font-weight:bold;font-size:11px;">📎 ${item.document_type}</span>`
+        : ''
+      const marker = L.marker([item.latitude, item.longitude], { icon }).bindPopup(
+        `<div style="font-family:sans-serif;font-size:12px;line-height:1.4;">
+          <strong style="color:#1c1917;font-size:13px;">${item.customer_name}</strong>
+          ${addr ? `<div style="color:#57534e;margin-top:2px;">📍 ${addr}</div>` : ''}
+          <div style="color:#78716c;margin-top:2px;">⏰ ${formatDateTime(item.created_at)}</div>
+          ${docBadge}
+        </div>`
+      )
+      marker.addTo(map)
+      bounds.push([item.latitude, item.longitude])
+    })
+
+    if (sorted.length > 1) {
+      L.polyline(bounds, {
+        color: '#C81D77',
+        weight: 3,
+        opacity: 0.75,
+        dashArray: '6,6',
+      }).addTo(map)
+    }
+
+    if (bounds.length === 1) {
+      map.setView(bounds[0], 15)
+    } else if (bounds.length > 1) {
+      map.fitBounds(bounds, { padding: [35, 35], maxZoom: 16 })
+    } else {
+      map.setView([39.9, 32.8], 6)
+    }
+  }, [activePanel, filteredCheckIns, addressMap])
 
   // Belge / Fotoğraf seçimi
   async function handleFileSelect(e) {
@@ -215,8 +305,7 @@ export default function RepDashboard({ user }) {
       const { latitude, longitude, accuracy } = pos.coords
 
       const isMock = Boolean(
-        accuracy === 0 ||
-        (pos.coords.altitudeAccuracy === 0 && accuracy < 1)
+        accuracy === 0 || (pos.coords.altitudeAccuracy === 0 && accuracy < 1)
       )
 
       setGpsStatus('Adres ve konum doğrulanıyor...')
@@ -275,15 +364,23 @@ export default function RepDashboard({ user }) {
     }
   }
 
+  // Aktif filtre başlık etiketi
+  const filterLabel = useMemo(() => {
+    if (dateFilter === 'today') return 'Bugünkü'
+    if (dateFilter === 'yesterday') return 'Dünkü'
+    if (dateFilter === 'week') return 'Son 7 Günlük'
+    if (dateFilter === 'custom') return `${customStart} - ${customEnd}`
+    return 'Tüm Zamanlar'
+  }, [dateFilter, customStart, customEnd])
+
   return (
     <div className="max-w-2xl mx-auto px-4 py-5 space-y-4">
-
-      {/* Tab Bar */}
+      {/* Sekme Butonları (Tab Bar) */}
       <div className="flex items-center gap-1.5 bg-white border border-stone-200/90 p-1 rounded-2xl shadow-xs">
         {[
           { key: 'checkin', label: 'Ziyaret Kaydet', Icon: Navigation },
-          { key: 'map', label: 'Rota Haritam', Icon: Map },
-          { key: 'history', label: `Geçmişim (${checkIns.length})`, Icon: List },
+          { key: 'map', label: `Rota Haritam (${filteredCheckIns.length})`, Icon: Map },
+          { key: 'history', label: `Geçmişim (${filteredCheckIns.length})`, Icon: List },
         ].map(({ key, label, Icon }) => (
           <button
             key={key}
@@ -302,7 +399,61 @@ export default function RepDashboard({ user }) {
         ))}
       </div>
 
-      {/* Panel: Ziyaret Kaydet */}
+      {/* Tarih Filtresi Barı (Sadece Harita ve Geçmiş sekmelerinde gösterilir) */}
+      {activePanel !== 'checkin' && (
+        <div className="bg-white rounded-2xl border border-stone-200/90 p-3 shadow-xs space-y-2">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-1.5 text-xs font-bold text-stone-700">
+              <Filter className="w-3.5 h-3.5 text-[#C81D77]" />
+              <span>Tarih Filtresi:</span>
+            </div>
+            <div className="flex items-center gap-1 flex-wrap">
+              {[
+                { id: 'today', label: 'Bugün' },
+                { id: 'yesterday', label: 'Dün' },
+                { id: 'week', label: 'Son 7 Gün' },
+                { id: 'all', label: 'Tümü' },
+                { id: 'custom', label: 'Özel Tarih' },
+              ].map((f) => (
+                <button
+                  key={f.id}
+                  type="button"
+                  onClick={() => setDateFilter(f.id)}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition cursor-pointer ${
+                    dateFilter === f.id
+                      ? 'bg-[#C81D77] text-white shadow-xs'
+                      : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
+                  }`}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Özel Tarih Seçici */}
+          {dateFilter === 'custom' && (
+            <div className="pt-2 border-t border-stone-100 flex items-center gap-2 flex-wrap">
+              <Calendar className="w-4 h-4 text-stone-400" />
+              <input
+                type="date"
+                value={customStart}
+                onChange={(e) => setCustomStart(e.target.value)}
+                className="px-2.5 py-1 text-xs rounded-lg border border-stone-200 bg-stone-50 text-stone-800 focus:outline-none focus:border-[#C81D77]"
+              />
+              <span className="text-xs text-stone-400">-</span>
+              <input
+                type="date"
+                value={customEnd}
+                onChange={(e) => setCustomEnd(e.target.value)}
+                className="px-2.5 py-1 text-xs rounded-lg border border-stone-200 bg-stone-50 text-stone-800 focus:outline-none focus:border-[#C81D77]"
+              />
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Panel 1: Ziyaret Kaydet */}
       {activePanel === 'checkin' && (
         <section className="bg-white rounded-3xl border border-stone-200/90 shadow-[0_12px_35px_-12px_rgba(24,24,27,0.07)] p-5 sm:p-7">
           <div className="flex items-center justify-between mb-5">
@@ -337,7 +488,10 @@ export default function RepDashboard({ user }) {
           <form onSubmit={handleCheckIn} className="space-y-4">
             {/* Müşteri Adı */}
             <div>
-              <label htmlFor="customerName" className="block text-xs font-semibold uppercase tracking-wider text-stone-500 mb-1.5">
+              <label
+                htmlFor="customerName"
+                className="block text-xs font-semibold uppercase tracking-wider text-stone-500 mb-1.5"
+              >
                 Müşteri / Firma Adı *
               </label>
               <div className="relative">
@@ -356,7 +510,10 @@ export default function RepDashboard({ user }) {
 
             {/* Ziyaret Notu */}
             <div>
-              <label htmlFor="visitNote" className="block text-xs font-semibold uppercase tracking-wider text-stone-500 mb-1.5">
+              <label
+                htmlFor="visitNote"
+                className="block text-xs font-semibold uppercase tracking-wider text-stone-500 mb-1.5"
+              >
                 Ziyaret Notu <span className="text-stone-400 font-normal">(İsteğe bağlı)</span>
               </label>
               <div className="relative">
@@ -378,13 +535,14 @@ export default function RepDashboard({ user }) {
               <div className="flex items-center justify-between">
                 <span className="text-xs font-bold uppercase tracking-wider text-amber-700 flex items-center gap-1.5">
                   <Paperclip className="w-3.5 h-3.5" />
-                  Belge / Evrak Fotoğrafı <span className="font-normal text-amber-600">(İsteğe bağlı)</span>
+                  Belge / Evrak Fotoğrafı{' '}
+                  <span className="font-normal text-amber-600">(İsteğe bağlı)</span>
                 </span>
               </div>
 
               {documentPreview ? (
                 <div className="space-y-2">
-                  <div className="relative inline-block">
+                  <div className="relative inline-block w-full">
                     <img
                       src={documentPreview}
                       alt="Belge önizleme"
@@ -393,9 +551,9 @@ export default function RepDashboard({ user }) {
                     <button
                       type="button"
                       onClick={clearDocument}
-                      className="absolute top-1.5 right-1.5 h-6 w-6 rounded-full bg-rose-500 text-white flex items-center justify-center shadow-md cursor-pointer"
+                      className="absolute top-2 right-2 h-7 w-7 rounded-full bg-rose-500 text-white flex items-center justify-center shadow-md cursor-pointer hover:bg-rose-600 transition"
                     >
-                      <X className="w-3.5 h-3.5" />
+                      <X className="w-4 h-4" />
                     </button>
                   </div>
                   <select
@@ -405,7 +563,9 @@ export default function RepDashboard({ user }) {
                   >
                     <option value="">Belge Tipi Seçin *</option>
                     {DOCUMENT_TYPES.map((t) => (
-                      <option key={t} value={t}>{t}</option>
+                      <option key={t} value={t}>
+                        {t}
+                      </option>
                     ))}
                   </select>
                 </div>
@@ -418,9 +578,15 @@ export default function RepDashboard({ user }) {
                     className="flex-1 inline-flex items-center justify-center gap-2 py-3 rounded-xl bg-amber-100 hover:bg-amber-200 text-amber-800 text-sm font-semibold transition disabled:opacity-60 cursor-pointer border border-amber-200"
                   >
                     {documentLoading ? (
-                      <><Loader2 className="w-4 h-4 animate-spin" /><span>Sıkıştırılıyor...</span></>
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>Sıkıştırılıyor...</span>
+                      </>
                     ) : (
-                      <><Camera className="w-4 h-4" /><span>Fotoğraf Çek / Seç</span></>
+                      <>
+                        <Camera className="w-4 h-4" />
+                        <span>Fotoğraf Çek / Seç</span>
+                      </>
                     )}
                   </button>
                   <input
@@ -462,35 +628,53 @@ export default function RepDashboard({ user }) {
         </section>
       )}
 
-      {/* Panel: Rota Haritam */}
-      {activePanel === 'map' && (
-        <section className="bg-white rounded-3xl border border-stone-200/90 shadow-sm overflow-hidden">
-          <div className="px-5 py-4 border-b border-stone-100 flex items-center justify-between">
-            <div>
-              <h3 className="font-bold text-stone-900">Bugünkü Rota Haritam</h3>
-              <p className="text-xs text-stone-500 mt-0.5">{checkIns.length} ziyaret noktası</p>
-            </div>
+      {/* Panel 2: Rota Haritam (DOM'da kalması için hidden/block kullanıyoruz, böylece harita sekme değişiminde asla kaybolmaz!) */}
+      <section
+        className={`bg-white rounded-3xl border border-stone-200/90 shadow-sm overflow-hidden ${
+          activePanel === 'map' ? 'block' : 'hidden'
+        }`}
+      >
+        <div className="px-5 py-4 border-b border-stone-100 flex items-center justify-between">
+          <div>
+            <h3 className="font-bold text-stone-900">{filterLabel} Rota Haritam</h3>
+            <p className="text-xs text-stone-500 mt-0.5">
+              {filteredCheckIns.length} ziyaret noktası işaretlendi
+            </p>
           </div>
-          {checkIns.length === 0 ? (
-            <div className="p-10 text-center">
-              <MapPin className="w-10 h-10 text-stone-200 mx-auto mb-2" />
-              <p className="text-sm text-stone-500">Henüz konum kaydı yok. Ziyaret kaydederek haritanızı oluşturun.</p>
-            </div>
-          ) : (
-            <div
-              ref={mapContainerRef}
-              style={{ height: '420px', width: '100%' }}
-            />
-          )}
-        </section>
-      )}
+          <button
+            type="button"
+            onClick={() => {
+              loadMyCheckIns()
+              setTimeout(() => myMapRef.current?.invalidateSize(), 200)
+            }}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-600 text-xs font-semibold cursor-pointer transition"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loadingList ? 'animate-spin' : ''}`} />
+            <span>Yenile</span>
+          </button>
+        </div>
 
-      {/* Panel: Geçmişim */}
+        {filteredCheckIns.length === 0 ? (
+          <div className="p-10 text-center">
+            <MapPin className="w-10 h-10 text-stone-200 mx-auto mb-2" />
+            <p className="text-sm font-semibold text-stone-700">
+              Seçilen tarih aralığında ziyaret kaydınız bulunmuyor.
+            </p>
+            <p className="text-xs text-stone-400 mt-1">
+              Filtreyi &quot;Tümü&quot; veya &quot;Son 7 Gün&quot; olarak değiştirebilirsiniz.
+            </p>
+          </div>
+        ) : (
+          <div ref={mapContainerRef} style={{ height: '440px', width: '100%' }} />
+        )}
+      </section>
+
+      {/* Panel 3: Geçmişim */}
       {activePanel === 'history' && (
         <section className="space-y-3">
           <div className="flex items-center justify-between px-1">
             <h3 className="text-sm font-bold uppercase tracking-wider text-stone-500">
-              Son Check-in&apos;lerim ({checkIns.length})
+              {filterLabel} Check-in&apos;lerim ({filteredCheckIns.length})
             </h3>
             <button
               type="button"
@@ -502,19 +686,29 @@ export default function RepDashboard({ user }) {
             </button>
           </div>
 
-          {loadingList && checkIns.length === 0 ? (
+          {loadingList && filteredCheckIns.length === 0 ? (
             <div className="bg-white rounded-2xl border border-stone-200/80 p-8 text-center text-sm text-stone-500">
               Kayıtlar yükleniyor...
             </div>
-          ) : checkIns.length === 0 ? (
+          ) : filteredCheckIns.length === 0 ? (
             <div className="bg-white rounded-2xl border border-stone-200/80 p-8 text-center">
               <MapPin className="w-8 h-8 text-stone-300 mx-auto mb-2" />
-              <p className="text-sm font-medium text-stone-600">Henüz hiç check-in yapmadınız.</p>
+              <p className="text-sm font-medium text-stone-600">
+                Seçilen tarihte check-in kaydınız bulunamadı.
+              </p>
+              <button
+                type="button"
+                onClick={() => setDateFilter('all')}
+                className="mt-2 text-xs font-semibold text-[#C81D77] hover:underline cursor-pointer"
+              >
+                Tüm kayıtları görüntüle
+              </button>
             </div>
           ) : (
             <div className="space-y-2.5">
-              {checkIns.map((item, idx) => {
-                const displayAddress = addressMap[item.id] || item.reverse_city || 'Adres belirleniyor...'
+              {filteredCheckIns.map((item, idx) => {
+                const displayAddress =
+                  addressMap[item.id] || item.reverse_city || 'Adres belirleniyor...'
                 const hasDoc = Boolean(item.document_url)
 
                 return (
@@ -526,7 +720,7 @@ export default function RepDashboard({ user }) {
                       <div className="min-w-0 space-y-1 flex-1">
                         <div className="flex items-center gap-2 flex-wrap">
                           <span className="font-extrabold text-xs px-2 py-0.5 rounded-md bg-stone-100 text-stone-700">
-                            #{checkIns.length - idx}
+                            #{filteredCheckIns.length - idx}
                           </span>
                           <h4 className="font-bold text-stone-900 text-sm sm:text-base">
                             {item.customer_name}
