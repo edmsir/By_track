@@ -65,3 +65,39 @@ export function isThisWeek(isoString) {
   const diffDays = (Date.now() - d.getTime()) / (1000 * 60 * 60 * 24)
   return diffDays <= 7
 }
+
+/**
+ * İki tarih arasında olup olmadığını kontrol eder (saat sınırı yok, tam gün kapsayıcı)
+ */
+export function isInDateRange(isoString, startDate, endDate) {
+  if (!isoString) return false
+  const d = new Date(isoString)
+  if (startDate) {
+    const start = new Date(startDate)
+    start.setHours(0, 0, 0, 0)
+    if (d < start) return false
+  }
+  if (endDate) {
+    const end = new Date(endDate)
+    end.setHours(23, 59, 59, 999)
+    if (d > end) return false
+  }
+  return true
+}
+
+/**
+ * Bugünün tarihini YYYY-MM-DD formatında döndürür (input[type=date] için)
+ */
+export function todayDateStr() {
+  const now = new Date()
+  return now.toISOString().split('T')[0]
+}
+
+/**
+ * N gün önceyi YYYY-MM-DD formatında döndürür
+ */
+export function daysAgoDateStr(n) {
+  const d = new Date()
+  d.setDate(d.getDate() - n)
+  return d.toISOString().split('T')[0]
+}

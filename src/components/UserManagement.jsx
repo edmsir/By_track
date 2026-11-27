@@ -12,6 +12,8 @@ import {
   Loader2,
   Building2,
   Briefcase,
+  Pencil,
+  X,
 } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 
@@ -37,7 +39,19 @@ export default function UserManagement({ adminUser }) {
   const [newPassword, setNewPassword] = useState('')
   const [resetting, setResetting] = useState(false)
 
+  // Edit user modal state
+  const [editTarget, setEditTarget] = useState(null)
+  const [editForm, setEditForm] = useState({
+    full_name: '',
+    username: '',
+    password: '',
+    role: 'rep',
+    branch_id: '',
+  })
+  const [saving, setSaving] = useState(false)
+
   const isMudur = adminUser.role === 'mudur'
+  const isAdmin = adminUser.role === 'admin'
 
   const loadBranches = useCallback(async () => {
     try {
@@ -173,6 +187,62 @@ export default function UserManagement({ adminUser }) {
       setTimeout(() => setSuccess(''), 4000)
     } catch (err) {
       setError(err.message || 'Kullanıcı silinemedi.')
+    }
+  }
+
+  // ── Edit modal ──────────────────────────────────────────────
+  function openEditModal(u) {
+    setEditTarget(u)
+    setEditForm({
+      full_name: u.full_name,
+      username: u.username,
+      password: '',
+      role: u.role,
+      branch_id: u.branch_id || '',
+    })
+    setError('')
+    setSuccess('')
+  }
+
+  async function handleSaveEdit(e) {
+    e.preventDefault()
+    if (!editTarget) return
+    if (editForm.full_name.trim().length < 2) {
+      setError('Ad Soyad en az 2 karakter olmalıdır.')
+      return
+    }
+    if (editForm.username.trim().length < 2) {
+      setError('Kullanıcı adı en az 2 karakter olmalıdır.')
+      return
+    }
+    if (editForm.password && editForm.password.length < 4) {
+      setError('Şifre girilecekse en az 4 karakter olmalıdır.')
+      return
+    }
+
+    setSaving(true)
+    setError('')
+    try {
+      const { error: rpcError } = await supabase.rpc('admin_update_user', {
+        p_admin_id: adminUser.id,
+        p_target_user_id: editTarget.id,
+        p_full_name: editForm.full_name.trim(),
+        p_username: editForm.username.trim().toLowerCase(),
+        p_role: isAdmin ? editForm.role : 'rep',
+        p_branch_id: isAdmin ? (editForm.branch_id || null) : adminUser.branch_id,
+        p_password: editForm.password ? editForm.password : null,
+        p_is_active: editTarget.is_active,
+      })
+      if (rpcError) throw rpcError
+
+      setSuccess(`"${editForm.full_name.trim()}" kullanıcısı başarıyla güncellendi.`)
+      setEditTarget(null)
+      await loadUsers()
+      setTimeout(() => setSuccess(''), 4500)
+    } catch (err) {
+      setError(err.message || 'Kullanıcı güncellenemedi.')
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -427,6 +497,19 @@ export default function UserManagement({ adminUser }) {
                     </div>
 
                     <div className="flex items-center gap-1.5 shrink-0 self-end sm:self-center">
+                      {/* Düzenle butonu — sadece kendi kendine değil, yönetilebilir kullanıcılara */}
+                      {!isSelf && (u.role === 'rep' || isAdmin) && (
+                        <button
+                          type="button"
+                          onClick={() => openEditModal(u)}
+                          title="Kullanıcıyı Düzenle"
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-semibold transition cursor-pointer"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                          <span>Düzenle</span>
+                        </button>
+                      )}
+
                       <button
                         type="button"
                         onClick={() => {
@@ -520,6 +603,143 @@ export default function UserManagement({ adminUser }) {
                   className="px-4 py-2 rounded-xl text-sm font-semibold bg-[#C81D77] hover:bg-[#B01767] text-white cursor-pointer disabled:opacity-60"
                 >
                   {resetting ? 'Kaydediliyor...' : 'Şifreyi Kaydet'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Edit User Modal */}
+      {editTarget && (
+        <div className="fixed inset-0 z-50 bg-stone-900/40 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl border border-stone-200 shadow-2xl w-full max-w-md p-6">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h4 className="font-bold text-stone-900 text-base">Kullanıcıyı Düzenle</h4>
+                <p className="text-xs text-stone-500 mt-0.5">@{editTarget.username}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditTarget(null)}
+                className="p-2 rounded-xl hover:bg-stone-100 text-stone-500 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {error && (
+              <div className="mb-4 flex items-start gap-2 p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600" />
+                <span>{error}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleSaveEdit} className="space-y-3.5">
+              {/* Ad Soyad */}
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wider text-stone-500 mb-1">
+                  Ad Soyad
+                </label>
+                <input
+                  type="text"
+                  value={editForm.full_name}
+                  onChange={(e) => setEditForm((f) => ({ ...f, full_name: e.target.value }))}
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-stone-50 border border-stone-200 text-sm focus:outline-none focus:bg-white focus:border-[#C81D77]"
+                />
+              </div>
+
+              {/* Kullanıcı Adı */}
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wider text-stone-500 mb-1">
+                  Kullanıcı Adı
+                </label>
+                <input
+                  type="text"
+                  autoCapitalize="none"
+                  value={editForm.username}
+                  onChange={(e) =>
+                    setEditForm((f) => ({ ...f, username: e.target.value.replace(/\s+/g, '') }))
+                  }
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-stone-50 border border-stone-200 text-sm focus:outline-none focus:bg-white focus:border-[#C81D77]"
+                />
+              </div>
+
+              {/* Şifre (opsiyonel) */}
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wider text-stone-500 mb-1">
+                  Yeni Şifre{' '}
+                  <span className="normal-case font-normal text-stone-400">(boş bırakılırsa değişmez)</span>
+                </label>
+                <input
+                  type="text"
+                  value={editForm.password}
+                  onChange={(e) => setEditForm((f) => ({ ...f, password: e.target.value }))}
+                  placeholder="Boş bırakın → mevcut şifre korunur"
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-stone-50 border border-stone-200 text-sm focus:outline-none focus:bg-white focus:border-[#C81D77]"
+                />
+              </div>
+
+              {/* Rol & Şube — sadece admin görebilir */}
+              {isAdmin && (
+                <>
+                  <div>
+                    <label className="block text-xs font-semibold uppercase tracking-wider text-stone-500 mb-1">
+                      Yetki Rolü
+                    </label>
+                    <select
+                      value={editForm.role}
+                      onChange={(e) => setEditForm((f) => ({ ...f, role: e.target.value }))}
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-stone-50 border border-stone-200 text-sm focus:outline-none focus:bg-white focus:border-[#C81D77]"
+                    >
+                      <option value="rep">Satış Temsilcisi (Saha Ekibi)</option>
+                      <option value="mudur">Şube Müdürü</option>
+                      <option value="yonetim">Genel Yönetim</option>
+                      <option value="admin">Sistem Yöneticisi (Admin)</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold uppercase tracking-wider text-stone-500 mb-1">
+                      Bağlı Olduğu Şube
+                    </label>
+                    <select
+                      value={editForm.branch_id}
+                      onChange={(e) => setEditForm((f) => ({ ...f, branch_id: e.target.value }))}
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-stone-50 border border-stone-200 text-sm focus:outline-none focus:bg-white focus:border-[#C81D77]"
+                    >
+                      <option value="">Şube Yok / Genel Merkez</option>
+                      {branches.map((b) => (
+                        <option key={b.id} value={b.id}>
+                          {b.name} ({b.city || 'Belirtilmemiş'})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </>
+              )}
+
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setEditTarget(null)}
+                  className="px-4 py-2 rounded-xl text-sm font-semibold text-stone-600 hover:bg-stone-100 cursor-pointer"
+                >
+                  İptal
+                </button>
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="px-5 py-2 rounded-xl text-sm font-semibold bg-[#C81D77] hover:bg-[#B01767] text-white cursor-pointer disabled:opacity-60 flex items-center gap-2"
+                >
+                  {saving ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Kaydediliyor...
+                    </>
+                  ) : (
+                    'Değişiklikleri Kaydet'
+                  )}
                 </button>
               </div>
             </form>

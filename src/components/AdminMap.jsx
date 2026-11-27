@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import L from 'leaflet'
-import { Maximize2, Minimize2, Eye, EyeOff } from 'lucide-react'
+import { Maximize2, Minimize2, Eye, EyeOff, FileText } from 'lucide-react'
 import { formatDateTime, getSmartMapsUrl } from '../lib/format'
 
-function createNumberedPinIcon(stepNumber, isLatest, repName, customerName, showDetails) {
+function createNumberedPinIcon(stepNumber, isLatest, repName, customerName, showDetails, hasDocument) {
   const shortRep = repName ? repName.split(' ')[0] : ''
   const safeCustomer = (customerName || '').slice(0, 16)
 
@@ -15,6 +15,7 @@ function createNumberedPinIcon(stepNumber, isLatest, repName, customerName, show
           showDetails
             ? `<div style="margin-bottom:4px;white-space:nowrap;background:rgba(24,24,27,0.92);backdrop-filter:blur(4px);color:#ffffff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:6px;box-shadow:0 3px 10px rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.15);pointer-events:none;transform:translateY(-2px);">
                  <span style="color:#94C11F;">${shortRep}:</span> ${safeCustomer}
+                 ${hasDocument ? '<span style="color:#F59E0B;margin-left:4px;">📎</span>' : ''}
                </div>`
             : ''
         }
@@ -30,8 +31,8 @@ function createNumberedPinIcon(stepNumber, isLatest, repName, customerName, show
         </div>
       </div>
     `,
-    iconSize: [showDetails ? 120 : 34, showDetails ? 56 : 34],
-    iconAnchor: [showDetails ? 60 : 17, showDetails ? 48 : 17],
+    iconSize: [showDetails ? 130 : 34, showDetails ? 56 : 34],
+    iconAnchor: [showDetails ? 65 : 17, showDetails ? 48 : 17],
   })
 }
 
@@ -41,7 +42,9 @@ export default function AdminMap({
   onSelect,
   showRoute = true,
   addressMap = {},
+  onViewDocument,
 }) {
+  const wrapperRef = useRef(null)
   const containerRef = useRef(null)
   const mapRef = useRef(null)
   const markersLayerRef = useRef(null)
@@ -50,6 +53,47 @@ export default function AdminMap({
 
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [showPinDetails, setShowPinDetails] = useState(false)
+
+  // Native Fullscreen API desteği (sağa kayma ve overflow hatasını %100 çözer)
+  const toggleFullscreen = async () => {
+    try {
+      if (!document.fullscreenElement && !document.webkitFullscreenElement) {
+        const el = wrapperRef.current
+        if (el?.requestFullscreen) {
+          await el.requestFullscreen()
+        } else if (el?.webkitRequestFullscreen) {
+          await el.webkitRequestFullscreen()
+        } else {
+          setIsFullscreen((prev) => !prev)
+        }
+      } else {
+        if (document.exitFullscreen) {
+          await document.exitFullscreen()
+        } else if (document.webkitExitFullscreen) {
+          await document.webkitExitFullscreen()
+        }
+      }
+    } catch {
+      setIsFullscreen((prev) => !prev)
+    }
+  }
+
+  useEffect(() => {
+    const handleFsChange = () => {
+      const active = Boolean(document.fullscreenElement || document.webkitFullscreenElement)
+      setIsFullscreen(active)
+      setTimeout(() => {
+        mapRef.current?.invalidateSize()
+      }, 150)
+    }
+
+    document.addEventListener('fullscreenchange', handleFsChange)
+    document.addEventListener('webkitfullscreenchange', handleFsChange)
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFsChange)
+      document.removeEventListener('webkitfullscreenchange', handleFsChange)
+    }
+  }, [])
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return
@@ -131,13 +175,16 @@ export default function AdminMap({
       items.forEach((item, index) => {
         const stepNum = index + 1
         const isLatest = index === totalInRep - 1
+        const hasDoc = Boolean(item.document_url || item.document_type)
+
         const marker = L.marker([item.latitude, item.longitude], {
           icon: createNumberedPinIcon(
             stepNum,
             isLatest,
             item.full_name,
             item.customer_name,
-            showPinDetails
+            showPinDetails,
+            hasDoc
           ),
         })
 
@@ -145,13 +192,23 @@ export default function AdminMap({
           addressMap[item.id] || item.reverse_city || 'Adres yükleniyor...'
 
         marker.bindPopup(`
-          <div style="min-width:220px;font-family:'Plus Jakarta Sans',sans-serif;">
+          <div style="min-width:230px;font-family:'Plus Jakarta Sans',sans-serif;">
             <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
               <span style="font-size:11px;font-weight:800;color:#C81D77;text-transform:uppercase;">${item.full_name}</span>
               <span style="background:#C81D77;color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:9999px;">Ziyaret #${stepNum}</span>
             </div>
+            ${item.branch_name ? `<div style="font-size:10px;font-weight:700;color:#0284c7;margin-top:2px;">🏢 ${item.branch_name}</div>` : ''}
             <div style="font-size:15px;font-weight:700;color:#1c1917;margin-top:4px;">${item.customer_name}</div>
-            <div style="font-size:11px;color:#44403c;margin-top:4px;background:#f5f5f4;padding:6px;border-radius:8px;line-height:1.4;">
+            
+            ${
+              hasDoc
+                ? `<div style="margin-top:6px;padding:4px 8px;border-radius:6px;background:#fef3c7;border:1px solid #fde68a;font-size:11px;font-weight:700;color:#92400e;display:flex;align-items:center;gap:4px;">
+                     <span>📎 Ekli Belge:</span> <strong>${item.document_type || 'Belge'}</strong>
+                   </div>`
+                : ''
+            }
+
+            <div style="font-size:11px;color:#44403c;margin-top:6px;background:#f5f5f4;padding:6px;border-radius:8px;line-height:1.4;">
               📍 <strong>Adres:</strong> ${displayAddress}
             </div>
             ${item.note ? `<div style="font-size:11px;color:#78716c;margin-top:4px;">💬 ${item.note}</div>` : ''}
@@ -205,10 +262,11 @@ export default function AdminMap({
 
   return (
     <div
-      className={`relative w-full rounded-3xl overflow-hidden border border-stone-200/90 bg-stone-100 shadow-sm transition-all duration-300 ${
+      ref={wrapperRef}
+      className={`relative w-full overflow-hidden bg-stone-100 shadow-sm transition-all duration-200 ${
         isFullscreen
-          ? 'fixed inset-0 z-50 rounded-none h-screen w-screen border-none'
-          : 'h-[400px] sm:h-[480px]'
+          ? 'fixed inset-0 z-[9999] w-full h-full rounded-none border-none'
+          : 'h-[400px] sm:h-[480px] rounded-3xl border border-stone-200/90'
       }`}
     >
       <div ref={containerRef} className="w-full h-full z-0" />
@@ -221,7 +279,7 @@ export default function AdminMap({
           className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold shadow-md backdrop-blur-md transition cursor-pointer ${
             showPinDetails
               ? 'bg-[#C81D77] text-white shadow-[#C81D77]/25'
-              : 'bg-white/90 hover:bg-white text-stone-700'
+              : 'bg-white/95 hover:bg-white text-stone-700'
           }`}
           title="Tüm temsilci ve müşteri adlarını harita üzerinde doğrudan göster"
         >
@@ -231,8 +289,8 @@ export default function AdminMap({
 
         <button
           type="button"
-          onClick={() => setIsFullscreen(!isFullscreen)}
-          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white/90 hover:bg-white text-stone-800 text-xs font-bold shadow-md backdrop-blur-md transition cursor-pointer"
+          onClick={toggleFullscreen}
+          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white/95 hover:bg-white text-stone-800 text-xs font-bold shadow-md backdrop-blur-md transition cursor-pointer"
         >
           {isFullscreen ? (
             <>

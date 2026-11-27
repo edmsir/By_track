@@ -17,6 +17,8 @@ import {
   Download,
   Trash2,
   Building2,
+  CalendarRange,
+  Paperclip,
 } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import {
@@ -31,6 +33,9 @@ import {
   getSmartMapsUrl,
   isToday,
   isThisWeek,
+  isInDateRange,
+  todayDateStr,
+  daysAgoDateStr,
 } from '../lib/format'
 import { exportCheckInsToExcel } from '../lib/excelExport'
 import { analyzeCheckInFraud } from '../lib/fraudDetector'
@@ -50,12 +55,16 @@ export default function AdminDashboard({ user }) {
   const [searchQuery, setSearchQuery] = useState('')
   const [branchFilter, setBranchFilter] = useState('all')
   const [repFilter, setRepFilter] = useState('all')
-  const [dateFilter, setDateFilter] = useState('today')
+  const [dateFilter, setDateFilter] = useState('today')  // 'today' | 'week' | 'all' | 'custom'
+  const [dateFrom, setDateFrom] = useState(daysAgoDateStr(7))
+  const [dateTo, setDateTo] = useState(todayDateStr())
+
+  // Document preview lightbox
+  const [docPreview, setDocPreview] = useState(null)
 
   // Route & Sound states
   const [showRoute, setShowRoute] = useState(true)
   const [soundEnabled, setSoundEnabled] = useState(true)
-  const [audioUnlocked, setAudioUnlocked] = useState(false)
   const [liveConnected, setLiveConnected] = useState(false)
   const [liveToast, setLiveToast] = useState(null)
   const [actionMsg, setActionMsg] = useState('')
@@ -67,7 +76,6 @@ export default function AdminDashboard({ user }) {
 
   const isYonetim = user.role === 'yonetim'
   const isMudur = user.role === 'mudur'
-  const isAdmin = user.role === 'admin'
 
   const loadBranches = useCallback(async () => {
     try {
@@ -81,13 +89,12 @@ export default function AdminDashboard({ user }) {
   const loadCheckIns = useCallback(async () => {
     setLoading(true)
     try {
-      // Hiyerarşik RPC fonksiyonu ile kullanıcının yetkili olduğu kayıtları çek
       const { data, error } = await supabase.rpc('get_authorized_check_ins', {
         p_requester_id: user.id,
       })
 
       if (error) {
-        console.warn('get_authorized_check_ins RPC hatası, doğrudan çekiliyor:', error)
+        console.warn('RPC hatası, doğrudan çekiliyor:', error)
         let query = supabase
           .from('check_ins')
           .select('*')
@@ -97,23 +104,21 @@ export default function AdminDashboard({ user }) {
         if (isMudur && user.branch_id) {
           query = query.eq('branch_id', user.branch_id)
         }
-
         const { data: fallbackData } = await query
         const items = fallbackData || []
         setCheckIns(items)
         items.forEach(async (item) => {
-          const fullAddr = await getReverseGeocodeAddress(item.latitude, item.longitude)
-          setAddressMap((prev) => ({ ...prev, [item.id]: fullAddr }))
+          const a = await getReverseGeocodeAddress(item.latitude, item.longitude)
+          setAddressMap((p) => ({ ...p, [item.id]: a }))
         })
         return
       }
 
       const items = data || []
       setCheckIns(items)
-
       items.forEach(async (item) => {
-        const fullAddr = await getReverseGeocodeAddress(item.latitude, item.longitude)
-        setAddressMap((prev) => ({ ...prev, [item.id]: fullAddr }))
+        const a = await getReverseGeocodeAddress(item.latitude, item.longitude)
+        setAddressMap((p) => ({ ...p, [item.id]: a }))
       })
     } catch (err) {
       console.error('Check-in verileri yüklenemedi:', err)
@@ -129,11 +134,8 @@ export default function AdminDashboard({ user }) {
 
   useEffect(() => {
     const handleFirstTouch = async () => {
-      const ok = await unlockAudio()
-      if (ok) {
-        setAudioUnlocked(true)
-        window.removeEventListener('pointerdown', handleFirstTouch)
-      }
+      await unlockAudio()
+      window.removeEventListener('pointerdown', handleFirstTouch)
     }
     window.addEventListener('pointerdown', handleFirstTouch, { passive: true })
     return () => window.removeEventListener('pointerdown', handleFirstTouch)
@@ -149,70 +151,49 @@ export default function AdminDashboard({ user }) {
           const newRecord = payload.new
           if (!newRecord) return
 
-          // Şube Müdürü: Sadece KENDİ ŞUBESİNE ait bildirimleri kabul eder
           if (isMudur && newRecord.branch_id && user.branch_id && newRecord.branch_id !== user.branch_id) {
             return
           }
 
-          // Şube adını ilişkilendir
           const branchObj = branches.find((b) => b.id === newRecord.branch_id)
-          const enrichedRecord = {
-            ...newRecord,
-            branch_name: branchObj ? branchObj.name : newRecord.branch_name,
-          }
+          const enriched = { ...newRecord, branch_name: branchObj?.name || newRecord.branch_name }
 
           setCheckIns((prev) => {
-            if (prev.some((c) => c.id === enrichedRecord.id)) return prev
-            return [enrichedRecord, ...prev]
+            if (prev.some((c) => c.id === enriched.id)) return prev
+            return [enriched, ...prev]
           })
-          setSelectedId(enrichedRecord.id)
+          setSelectedId(enriched.id)
 
-          getReverseGeocodeAddress(enrichedRecord.latitude, enrichedRecord.longitude).then((addr) => {
-            setAddressMap((prev) => ({ ...prev, [enrichedRecord.id]: addr }))
+          getReverseGeocodeAddress(enriched.latitude, enriched.longitude).then((a) => {
+            setAddressMap((p) => ({ ...p, [enriched.id]: a }))
           })
 
-          setLiveToast(enrichedRecord)
-          setTimeout(() => {
-            setLiveToast((current) =>
-              current?.id === enrichedRecord.id ? null : current
-            )
-          }, 9000)
+          setLiveToast(enriched)
+          setTimeout(() => setLiveToast((c) => c?.id === enriched.id ? null : c), 9000)
 
-          if (soundEnabled) {
-            await playCheckInAlert()
-          }
-
+          if (soundEnabled) await playCheckInAlert()
           showBrowserNotification(
-            `🔔 Yeni Ziyaret: ${enrichedRecord.full_name}${enrichedRecord.branch_name ? ` (${enrichedRecord.branch_name})` : ''}`,
-            `${enrichedRecord.customer_name}${enrichedRecord.note ? ' — ' + enrichedRecord.note : ''}`
+            `🔔 Yeni Ziyaret: ${enriched.full_name}${enriched.branch_name ? ` (${enriched.branch_name})` : ''}`,
+            `${enriched.customer_name}${enriched.note ? ' — ' + enriched.note : ''}`
           )
         }
       )
-      .subscribe((status) => {
-        setLiveConnected(status === 'SUBSCRIBED')
-      })
+      .subscribe((status) => setLiveConnected(status === 'SUBSCRIBED'))
 
-    return () => {
-      supabase.removeChannel(channel)
-    }
+    return () => { supabase.removeChannel(channel) }
   }, [soundEnabled, isMudur, user.branch_id, branches])
 
   async function handleRequestNotification() {
     await unlockAudio()
-    setAudioUnlocked(true)
     const perm = await requestBrowserNotificationPermission()
     setNotifPermission(perm)
     await playCheckInAlert()
-    showBrowserNotification(
-      'by Fabric Bildirimleri Aktif!',
-      'Saha ekibinden yeni bir konum geldiğinde ses ve bildirim alacaksınız.'
-    )
+    showBrowserNotification('by Fabric Bildirimleri Aktif!', 'Yeni konum geldiğinde ses ve bildirim alacaksınız.')
   }
 
   async function handleToggleSound() {
     if (!soundEnabled) {
       await unlockAudio()
-      setAudioUnlocked(true)
       setSoundEnabled(true)
       await playCheckInAlert()
     } else {
@@ -220,11 +201,8 @@ export default function AdminDashboard({ user }) {
     }
   }
 
-  // Bildirim Yönetimi: Kesin Silme
   async function handleDeleteCheckIn(item) {
-    const ok = window.confirm(
-      `"${item.customer_name}" (${item.full_name}) bildirimini silmek istediğinize emin misiniz?`
-    )
+    const ok = window.confirm(`"${item.customer_name}" (${item.full_name}) bildirimini silmek istediğinize emin misiniz?`)
     if (!ok) return
 
     try {
@@ -234,12 +212,7 @@ export default function AdminDashboard({ user }) {
       })
 
       if (rpcErr) {
-        console.warn('RPC hatası, doğrudan delete deneniyor:', rpcErr)
-        const { error: directErr } = await supabase
-          .from('check_ins')
-          .delete()
-          .eq('id', item.id)
-
+        const { error: directErr } = await supabase.from('check_ins').delete().eq('id', item.id)
         if (directErr) throw directErr
       }
 
@@ -247,22 +220,16 @@ export default function AdminDashboard({ user }) {
       setActionMsg(`"${item.customer_name}" bildirimi kalıcı olarak silindi.`)
       setTimeout(() => setActionMsg(''), 4000)
     } catch (err) {
-      console.error('Silme hatası:', err)
-      alert('Bildirim veritabanından silinemedi: ' + (err.message || 'Yetki hatası'))
+      alert('Bildirim silinemedi: ' + (err.message || 'Hata'))
     }
   }
 
   const uniqueReps = useMemo(() => {
     const map = new Map()
     for (const c of checkIns) {
-      if (!map.has(c.username)) {
-        map.set(c.username, c.full_name)
-      }
+      if (!map.has(c.username)) map.set(c.username, c.full_name)
     }
-    return Array.from(map.entries()).map(([username, fullName]) => ({
-      username,
-      fullName,
-    }))
+    return Array.from(map.entries()).map(([username, fullName]) => ({ username, fullName }))
   }, [checkIns])
 
   const filteredCheckIns = useMemo(() => {
@@ -271,6 +238,7 @@ export default function AdminDashboard({ user }) {
       if (repFilter !== 'all' && item.username !== repFilter) return false
       if (dateFilter === 'today' && !isToday(item.created_at)) return false
       if (dateFilter === 'week' && !isThisWeek(item.created_at)) return false
+      if (dateFilter === 'custom' && !isInDateRange(item.created_at, dateFrom, dateTo)) return false
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase()
         const matchCustomer = item.customer_name.toLowerCase().includes(q)
@@ -278,39 +246,30 @@ export default function AdminDashboard({ user }) {
         const matchBranch = (item.branch_name || '').toLowerCase().includes(q)
         const matchNote = (item.note || '').toLowerCase().includes(q)
         const matchAddr = (addressMap[item.id] || '').toLowerCase().includes(q)
-        if (!matchCustomer && !matchRep && !matchBranch && !matchNote && !matchAddr) return false
+        const matchDoc = (item.document_type || '').toLowerCase().includes(q)
+        if (!matchCustomer && !matchRep && !matchBranch && !matchNote && !matchAddr && !matchDoc) return false
       }
       return true
     })
-  }, [checkIns, branchFilter, repFilter, dateFilter, searchQuery, addressMap])
+  }, [checkIns, branchFilter, repFilter, dateFilter, dateFrom, dateTo, searchQuery, addressMap])
 
   const fraudAnalysisMap = useMemo(() => {
     const map = {}
-    const sorted = [...checkIns].sort(
-      (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-    )
-    const lastSeenByRep = {}
+    const sorted = [...checkIns].sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+    const lastSeen = {}
     sorted.forEach((item) => {
-      const prev = lastSeenByRep[item.username]
-      const result = analyzeCheckInFraud(item, prev)
-      map[item.id] = result
-      lastSeenByRep[item.username] = item
+      const prev = lastSeen[item.username]
+      map[item.id] = analyzeCheckInFraud(item, prev)
+      lastSeen[item.username] = item
     })
     return map
   }, [checkIns])
 
-  const todayCount = useMemo(
-    () => checkIns.filter((c) => isToday(c.created_at)).length,
-    [checkIns]
-  )
+  const todayCount = useMemo(() => checkIns.filter((c) => isToday(c.created_at)).length, [checkIns])
 
   function handleExportExcel() {
     try {
-      exportCheckInsToExcel(
-        filteredCheckIns,
-        { rep: repFilter, date: dateFilter },
-        addressMap
-      )
+      exportCheckInsToExcel(filteredCheckIns, { rep: repFilter, date: dateFilter, dateFrom, dateTo }, addressMap)
     } catch (err) {
       alert(err.message || 'Excel oluşturulamadı.')
     }
@@ -318,6 +277,7 @@ export default function AdminDashboard({ user }) {
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-5 space-y-5">
+      {/* Bildirim İzni */}
       {notifPermission !== 'granted' && (
         <div className="bg-gradient-to-r from-[#C81D77] to-[#8c1050] text-white p-3.5 sm:p-4 rounded-2xl shadow-md flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="flex items-center gap-3">
@@ -325,12 +285,8 @@ export default function AdminDashboard({ user }) {
               <BellRing className="w-5 h-5 text-white" />
             </div>
             <div>
-              <p className="font-bold text-sm">
-                Web Sitesi Bildirimleri &amp; Sesleri Açın
-              </p>
-              <p className="text-xs text-white/85">
-                Yeni bir müşteri ziyareti yapıldığında ekranda sesli zil ve popup almak için izin verin.
-              </p>
+              <p className="font-bold text-sm">Web Sitesi Bildirimleri &amp; Sesleri Açın</p>
+              <p className="text-xs text-white/85">Yeni ziyaret bildiriminde sesli zil ve popup almak için izin verin.</p>
             </div>
           </div>
           <button
@@ -349,6 +305,7 @@ export default function AdminDashboard({ user }) {
         </div>
       )}
 
+      {/* Canlı Toast */}
       {liveToast && (
         <div className="fixed bottom-4 right-4 left-4 sm:left-auto sm:w-96 z-50 bg-stone-900 text-white rounded-2xl p-4 shadow-2xl border border-[#C81D77]/40 flex items-start gap-3 animate-bounce">
           <div className="h-10 w-10 rounded-xl bg-[#C81D77] flex items-center justify-center shrink-0">
@@ -356,22 +313,38 @@ export default function AdminDashboard({ user }) {
           </div>
           <div className="min-w-0 flex-1">
             <p className="text-[11px] font-bold uppercase tracking-wider text-[#94C11F]">
-              Yeni Konum Bildirimi {liveToast.branch_name ? `• ${liveToast.branch_name}` : ''}
+              Yeni Konum {liveToast.branch_name ? `• ${liveToast.branch_name}` : ''}
             </p>
             <p className="font-bold text-sm truncate mt-0.5">
               {liveToast.full_name} &rarr; {liveToast.customer_name}
             </p>
-            {liveToast.note && (
-              <p className="text-xs text-stone-300 truncate mt-0.5">{liveToast.note}</p>
+            {liveToast.note && <p className="text-xs text-stone-300 truncate mt-0.5">{liveToast.note}</p>}
+            {liveToast.document_type && (
+              <p className="text-xs text-amber-400 mt-0.5">📎 {liveToast.document_type}</p>
             )}
           </div>
-          <button
-            type="button"
-            onClick={() => setLiveToast(null)}
-            className="text-stone-400 hover:text-white p-1 cursor-pointer"
-          >
+          <button type="button" onClick={() => setLiveToast(null)} className="text-stone-400 hover:text-white p-1 cursor-pointer">
             <X className="w-4 h-4" />
           </button>
+        </div>
+      )}
+
+      {/* Belge Lightbox */}
+      {docPreview && (
+        <div
+          className="fixed inset-0 z-[9999] bg-black/80 flex items-center justify-center p-4"
+          onClick={() => setDocPreview(null)}
+        >
+          <div className="relative max-w-2xl w-full" onClick={(e) => e.stopPropagation()}>
+            <button
+              onClick={() => setDocPreview(null)}
+              className="absolute -top-4 -right-4 h-9 w-9 rounded-full bg-white text-stone-900 flex items-center justify-center shadow-lg cursor-pointer z-10"
+            >
+              <X className="w-5 h-5" />
+            </button>
+            <div className="text-center text-white text-xs font-semibold mb-2 opacity-70">{docPreview.type}</div>
+            <img src={docPreview.url} alt={docPreview.type} className="w-full rounded-2xl shadow-2xl" />
+          </div>
         </div>
       )}
 
@@ -382,9 +355,7 @@ export default function AdminDashboard({ user }) {
             type="button"
             onClick={() => setActiveTab('tracking')}
             className={`flex-1 sm:flex-initial inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition cursor-pointer ${
-              activeTab === 'tracking'
-                ? 'bg-white text-stone-900 shadow-xs'
-                : 'text-stone-600 hover:text-stone-900'
+              activeTab === 'tracking' ? 'bg-white text-stone-900 shadow-xs' : 'text-stone-600 hover:text-stone-900'
             }`}
           >
             <MapPin className="w-4 h-4 text-[#C81D77]" />
@@ -394,31 +365,24 @@ export default function AdminDashboard({ user }) {
             </span>
           </button>
 
-          {/* Yönetim Rolü kullanıcı yönetimi yapmaz, sadece admin ve şube müdürü görür */}
           {!isYonetim && (
             <button
               type="button"
               onClick={() => setActiveTab('users')}
               className={`flex-1 sm:flex-initial inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition cursor-pointer ${
-                activeTab === 'users'
-                  ? 'bg-white text-stone-900 shadow-xs'
-                  : 'text-stone-600 hover:text-stone-900'
+                activeTab === 'users' ? 'bg-white text-stone-900 shadow-xs' : 'text-stone-600 hover:text-stone-900'
               }`}
             >
               <Users className="w-4 h-4 text-[#C81D77]" />
-              <span>{isMudur ? 'Şube Ekibi & Şifre' : 'Kullanıcı Yönetimi'}</span>
+              <span>{isMudur ? 'Şube Ekibi' : 'Kullanıcı Yönetimi'}</span>
             </button>
           )}
         </div>
 
         <div className="flex items-center justify-between sm:justify-end gap-2 flex-wrap">
-          <div
-            className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold ${
-              liveConnected
-                ? 'bg-emerald-50 text-emerald-700'
-                : 'bg-stone-100 text-stone-500'
-            }`}
-          >
+          <div className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold ${
+            liveConnected ? 'bg-emerald-50 text-emerald-700' : 'bg-stone-100 text-stone-500'
+          }`}>
             <Radio className={`w-3.5 h-3.5 ${liveConnected ? 'animate-pulse' : ''}`} />
             <span>{liveConnected ? 'Canlı Bağlı' : 'Bağlanıyor...'}</span>
           </div>
@@ -427,32 +391,17 @@ export default function AdminDashboard({ user }) {
             type="button"
             onClick={handleToggleSound}
             className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition cursor-pointer ${
-              soundEnabled
-                ? 'bg-[#C81D77]/10 text-[#C81D77] hover:bg-[#C81D77]/15'
-                : 'bg-stone-100 text-stone-500 hover:bg-stone-200'
+              soundEnabled ? 'bg-[#C81D77]/10 text-[#C81D77]' : 'bg-stone-100 text-stone-500'
             }`}
           >
-            {soundEnabled ? (
-              <>
-                <Volume2 className="w-4 h-4" />
-                <span>Ses Açık</span>
-              </>
-            ) : (
-              <>
-                <VolumeX className="w-4 h-4" />
-                <span>Ses Kapalı</span>
-              </>
-            )}
+            {soundEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
+            <span>{soundEnabled ? 'Ses Açık' : 'Ses Kapalı'}</span>
           </button>
 
           <button
             type="button"
-            onClick={async () => {
-              await unlockAudio()
-              await playCheckInAlert()
-            }}
+            onClick={async () => { await unlockAudio(); await playCheckInAlert() }}
             className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-[#94C11F]/20 hover:bg-[#94C11F]/30 text-[#4c660b] text-xs font-bold transition cursor-pointer"
-            title="Sesi Test Et"
           >
             <BellRing className="w-3.5 h-3.5" />
             <span>Sesi Çal</span>
@@ -466,9 +415,8 @@ export default function AdminDashboard({ user }) {
         <div className="space-y-4">
           <div className="flex items-center justify-between px-1">
             <span className="text-xs font-bold uppercase tracking-wider text-stone-500">
-              Günün Ziyaret Sıralaması &amp; Rota Haritası
+              Ziyaret Sıralaması &amp; Rota Haritası
             </span>
-
             <label className="inline-flex items-center gap-1.5 text-xs font-semibold text-stone-700 cursor-pointer">
               <input
                 type="checkbox"
@@ -489,22 +437,23 @@ export default function AdminDashboard({ user }) {
             addressMap={addressMap}
           />
 
-          {/* Filters, Excel Export & Feed */}
+          {/* Filters */}
           <div className="bg-white rounded-3xl border border-stone-200/90 p-4 sm:p-6 shadow-xs space-y-4">
-            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+            <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-3">
               <div className="flex flex-wrap items-center gap-2 flex-1">
-                <div className="relative flex-1 min-w-[200px]">
+                {/* Arama */}
+                <div className="relative min-w-[200px] flex-1">
                   <Search className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
                   <input
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Müşteri, adres, şube veya temsilci ara..."
+                    placeholder="Müşteri, belge, şube, temsilci..."
                     className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-stone-50 border border-stone-200 text-sm focus:outline-none focus:bg-white focus:border-[#C81D77]"
                   />
                 </div>
 
-                {/* Şube Filtresi: Admin ve Yönetim için tüm şubeler, Şube Müdürü için sabit kendi şubesi */}
+                {/* Şube Filtresi */}
                 {!isMudur ? (
                   <select
                     value={branchFilter}
@@ -513,9 +462,7 @@ export default function AdminDashboard({ user }) {
                   >
                     <option value="all">Tüm Şubeler</option>
                     {branches.map((b) => (
-                      <option key={b.id} value={b.id}>
-                        {b.name}
-                      </option>
+                      <option key={b.id} value={b.id}>{b.name}</option>
                     ))}
                   </select>
                 ) : (
@@ -525,6 +472,7 @@ export default function AdminDashboard({ user }) {
                   </div>
                 )}
 
+                {/* Temsilci Filtresi */}
                 <select
                   value={repFilter}
                   onChange={(e) => setRepFilter(e.target.value)}
@@ -532,12 +480,11 @@ export default function AdminDashboard({ user }) {
                 >
                   <option value="all">Tüm Temsilciler</option>
                   {uniqueReps.map((r) => (
-                    <option key={r.username} value={r.username}>
-                      {r.fullName}
-                    </option>
+                    <option key={r.username} value={r.username}>{r.fullName}</option>
                   ))}
                 </select>
 
+                {/* Tarih Filtresi */}
                 <select
                   value={dateFilter}
                   onChange={(e) => setDateFilter(e.target.value)}
@@ -546,16 +493,17 @@ export default function AdminDashboard({ user }) {
                   <option value="today">Sadece Bugün</option>
                   <option value="week">Son 7 Gün</option>
                   <option value="all">Tüm Tarihler</option>
+                  <option value="custom">📅 Tarih Aralığı Seç</option>
                 </select>
               </div>
 
+              {/* Excel & Yenile Butonları */}
               <div className="flex items-center gap-2 shrink-0 flex-wrap">
                 <button
                   type="button"
                   onClick={handleExportExcel}
                   disabled={filteredCheckIns.length === 0}
                   className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-sm transition disabled:opacity-50 cursor-pointer"
-                  title="Görüntülenen kayıtları detaylı adresleriyle Excel olarak indir"
                 >
                   <FileSpreadsheet className="w-4 h-4" />
                   <span>Excel Raporu</span>
@@ -573,16 +521,42 @@ export default function AdminDashboard({ user }) {
               </div>
             </div>
 
-            {loading && checkIns.length === 0 ? (
-              <div className="py-12 text-center text-sm text-stone-500">
-                Konum kayıtları yükleniyor...
+            {/* Özel Tarih Aralığı Seçici */}
+            {dateFilter === 'custom' && (
+              <div className="flex flex-wrap items-center gap-3 p-3.5 bg-blue-50 border border-blue-200 rounded-2xl">
+                <CalendarRange className="w-4 h-4 text-blue-600 shrink-0" />
+                <span className="text-xs font-bold text-blue-800">Tarih Aralığı:</span>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="date"
+                    value={dateFrom}
+                    max={dateTo}
+                    onChange={(e) => setDateFrom(e.target.value)}
+                    className="px-3 py-2 rounded-xl bg-white border border-blue-200 text-sm font-medium text-stone-700 focus:outline-none focus:border-blue-400"
+                  />
+                  <span className="text-xs text-stone-500">—</span>
+                  <input
+                    type="date"
+                    value={dateTo}
+                    min={dateFrom}
+                    max={todayDateStr()}
+                    onChange={(e) => setDateTo(e.target.value)}
+                    className="px-3 py-2 rounded-xl bg-white border border-blue-200 text-sm font-medium text-stone-700 focus:outline-none focus:border-blue-400"
+                  />
+                </div>
+                <span className="text-xs text-blue-700 font-semibold">
+                  {filteredCheckIns.length} kayıt bulundu
+                </span>
               </div>
+            )}
+
+            {/* Check-in Listesi */}
+            {loading && checkIns.length === 0 ? (
+              <div className="py-12 text-center text-sm text-stone-500">Konum kayıtları yükleniyor...</div>
             ) : filteredCheckIns.length === 0 ? (
               <div className="py-12 text-center">
                 <MapPin className="w-8 h-8 text-stone-300 mx-auto mb-2" />
-                <p className="text-sm font-medium text-stone-600">
-                  Seçilen filtrelere uygun konum kaydı bulunamadı.
-                </p>
+                <p className="text-sm font-medium text-stone-600">Seçilen filtrelere uygun konum kaydı bulunamadı.</p>
               </div>
             ) : (
               <div className="divide-y divide-stone-100">
@@ -591,12 +565,13 @@ export default function AdminDashboard({ user }) {
                   const fraudInfo = fraudAnalysisMap[item.id] || {}
                   const hasFraud = fraudInfo.isSuspicious
                   const displayAddress = addressMap[item.id] || item.reverse_city || 'Adres belirleniyor...'
+                  const hasDoc = Boolean(item.document_url)
 
                   return (
                     <div
                       key={item.id}
                       onClick={() => setSelectedId(item.id)}
-                      className={`py-3.5 px-3 -mx-3 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 cursor-pointer transition ${
+                      className={`py-3.5 px-3 -mx-3 rounded-2xl flex flex-col sm:flex-row sm:items-start justify-between gap-3 cursor-pointer transition ${
                         isSelected
                           ? 'bg-[#C81D77]/8 ring-1 ring-[#C81D77]/30'
                           : hasFraud
@@ -604,41 +579,36 @@ export default function AdminDashboard({ user }) {
                           : 'hover:bg-stone-50'
                       }`}
                     >
-                      <div className="flex items-start gap-3 min-w-0">
-                        <div
-                          className={`mt-0.5 h-9 w-9 rounded-xl flex items-center justify-center font-extrabold text-xs shrink-0 ${
-                            hasFraud
-                              ? 'bg-rose-600 text-white shadow-xs'
-                              : idx === 0
-                              ? 'bg-[#C81D77] text-white shadow-xs'
-                              : 'bg-[#94C11F]/25 text-[#47600a]'
-                          }`}
-                        >
+                      <div className="flex items-start gap-3 min-w-0 flex-1">
+                        <div className={`mt-0.5 h-9 w-9 rounded-xl flex items-center justify-center font-extrabold text-xs shrink-0 ${
+                          hasFraud ? 'bg-rose-600 text-white' : idx === 0 ? 'bg-[#C81D77] text-white' : 'bg-[#94C11F]/25 text-[#47600a]'
+                        }`}>
                           #{filteredCheckIns.length - idx}
                         </div>
-                        <div className="min-w-0 space-y-1">
+                        <div className="min-w-0 space-y-1 flex-1">
                           <div className="flex items-center gap-2 flex-wrap">
                             <span className="font-bold text-stone-900 text-sm sm:text-base">
                               {item.customer_name}
                             </span>
-                            <span className="text-xs font-semibold text-[#C81D77]">
-                              &bull; {item.full_name}
-                            </span>
-
+                            <span className="text-xs font-semibold text-[#C81D77]">&bull; {item.full_name}</span>
                             {item.branch_name && (
                               <span className="px-2 py-0.5 rounded-full text-[11px] font-medium bg-stone-100 text-stone-700 border border-stone-200">
                                 🏢 {item.branch_name}
                               </span>
                             )}
-
+                            {hasDoc && (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-amber-100 text-amber-800">
+                                <Paperclip className="w-3 h-3" />
+                                {item.document_type || 'Belge'}
+                              </span>
+                            )}
                             <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-stone-100 text-stone-600">
                               {formatRelativeTime(item.created_at)}
                             </span>
-
                             {hasFraud && (
-                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-rose-600 text-white shadow-xs animate-pulse">
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-rose-600 text-white animate-pulse">
                                 <ShieldAlert className="w-3.5 h-3.5" />
-                                Sahte GPS / Işınlanma Şüphesi!
+                                Sahte GPS Şüphesi!
                               </span>
                             )}
                           </div>
@@ -657,9 +627,21 @@ export default function AdminDashboard({ user }) {
                           )}
 
                           {item.note && (
-                            <p className="text-xs sm:text-sm text-stone-600">
-                              💬 {item.note}
-                            </p>
+                            <p className="text-xs sm:text-sm text-stone-600">💬 {item.note}</p>
+                          )}
+
+                          {/* Belge küçük önizleme */}
+                          {hasDoc && (
+                            <div
+                              className="mt-1 cursor-pointer inline-block"
+                              onClick={(e) => { e.stopPropagation(); setDocPreview({ url: item.document_url, type: item.document_type }) }}
+                            >
+                              <img
+                                src={item.document_url}
+                                alt={item.document_type}
+                                className="h-14 w-auto rounded-lg border border-amber-200 object-cover bg-white hover:opacity-80 transition"
+                              />
+                            </div>
                           )}
 
                           <div className="flex items-center gap-3 text-xs text-stone-400 pt-0.5 flex-wrap">
@@ -674,7 +656,7 @@ export default function AdminDashboard({ user }) {
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+                      <div className="flex items-center gap-2 shrink-0 self-end sm:self-start sm:mt-1">
                         <a
                           href={getSmartMapsUrl(item.latitude, item.longitude, item.customer_name)}
                           target="_blank"
@@ -682,19 +664,14 @@ export default function AdminDashboard({ user }) {
                           onClick={(e) => e.stopPropagation()}
                           className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-stone-100 hover:bg-[#C81D77] text-stone-700 hover:text-white text-xs font-semibold transition"
                         >
-                          <span>Haritada Aç</span>
+                          <span>Harita</span>
                           <ExternalLink className="w-3.5 h-3.5" />
                         </a>
 
-                        {/* Yönetim Rolü bildirim silemez (salt okunur), Admin ve Şube Müdürü silebilir */}
                         {!isYonetim && (
                           <button
                             type="button"
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              handleDeleteCheckIn(item)
-                            }}
-                            title="Bu bildirimi sil (Test/Hatalı)"
+                            onClick={(e) => { e.stopPropagation(); handleDeleteCheckIn(item) }}
                             className="p-2 rounded-xl bg-stone-100 hover:bg-rose-100 text-stone-400 hover:text-rose-600 transition cursor-pointer"
                           >
                             <Trash2 className="w-4 h-4" />
